@@ -1,0 +1,20 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "repo-weaver"
+version = "0.1.0"
+description = "Turn a git repo's commits + PRs into a queryable knowledge corpus via wiki-weaver."
+requires-python = ">=3.11"
+dependencies = []
+readme = "README.md"
+license = { text = "MIT" }
+
+[project.scripts]
+repo-weaver = "repo_weaver.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["repo_weaver"]
+# policy/ directory must be accessible relative to this pyproject.toml at runtime
+# (works for editable installs; for wheel distribution copy policy/ into repo_weaver/)

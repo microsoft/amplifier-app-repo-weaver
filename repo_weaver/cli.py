@@ -1,0 +1,465 @@
+"""Command-line interface for repo-weaver.
+
+Entry point: ``main()`` — registered as the ``repo-weaver`` console script.
+Each subcommand is a plain function that returns an integer exit code.
+
+Usage:
+    repo-weaver doctor
+    repo-weaver init <corpus_dir> [--repo PATH]
+    repo-weaver weave --corpus DIR [options]
+    repo-weaver ask "<question>" --corpus DIR [--json]
+    repo-weaver replay --corpus DIR --windows "D1,D2,..." [options]
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shutil
+import subprocess
+import sys
+from datetime import date, timedelta
+from pathlib import Path
+from typing import Optional
+
+from . import gitio
+from . import weave as weave_mod
+
+# Policy schema shipped with repo-weaver (relative to this file).
+# Works for both editable installs (project layout) and wheel installs when
+# policy/ is at the project root adjacent to repo_weaver/.
+_HERE = Path(__file__).parent
+_POLICY_DIR: Optional[Path] = None
+
+
+def _policy_dir() -> Optional[Path]:
+    """Locate the shipped policy/ directory, lazily resolved once."""
+    global _POLICY_DIR
+    if _POLICY_DIR is not None:
+        return _POLICY_DIR
+
+    candidates = [
+        _HERE.parent / "policy",  # editable install: policy/ at project root
+        _HERE / "policy",  # wheel install: policy/ inside the package
+    ]
+    for c in candidates:
+        if c.is_dir():
+            _POLICY_DIR = c
+            return _POLICY_DIR
+    return None
+
+
+# Filename stored inside each corpus to record the repo path and origin URL.
+_CORPUS_CONFIG = ".repo-weaver.json"
+
+
+def _load_corpus_config(corpus: str) -> dict[str, str]:
+    cfg_path = Path(corpus) / _CORPUS_CONFIG
+    if cfg_path.exists():
+        try:
+            return json.loads(cfg_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return {}
+    return {}
+
+
+def _save_corpus_config(corpus: str, cfg: dict[str, str]) -> None:
+    cfg_path = Path(corpus) / _CORPUS_CONFIG
+    cfg_path.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+
+
+def _resolve_repo(args_repo: Optional[str], corpus: str) -> Optional[str]:
+    """Return the repo path from CLI arg or stored corpus config."""
+    if args_repo:
+        return args_repo
+    cfg = _load_corpus_config(corpus)
+    return cfg.get("repo")
+
+
+# ---------------------------------------------------------------------------
+# Subcommand: doctor
+# ---------------------------------------------------------------------------
+
+
+def _check_tool(name: str, version_cmd: Optional[list[str]] = None) -> tuple[bool, str]:
+    """Return (ok, detail) for a tool dependency."""
+    if shutil.which(name) is None:
+        return False, "not found on PATH"
+    if version_cmd:
+        r = subprocess.run(version_cmd, capture_output=True, text=True)
+        if r.returncode != 0:
+            stderr = (r.stderr or r.stdout or "").strip()
+            return False, f"found but reported an error: {stderr[:80]}"
+        ver = (r.stdout or "").strip().splitlines()[0] if r.stdout.strip() else "(ok)"
+        return True, ver
+    return True, "found"
+
+
+def cmd_doctor(args: argparse.Namespace) -> int:  # noqa: ARG001
+    """Print a dependency status table and exit 1 if anything is missing."""
+    rows: list[tuple[str, bool, str]] = []
+
+    # wiki-weaver
+    ok, detail = _check_tool("wiki-weaver", ["wiki-weaver", "--version"])
+    rows.append(("wiki-weaver", ok, detail))
+
+    # git
+    ok, detail = _check_tool("git", ["git", "--version"])
+    rows.append(("git", ok, detail))
+
+    # gh + auth
+    if shutil.which("gh") is None:
+        rows.append(("gh", False, "not found on PATH"))
+    else:
+        r = subprocess.run(["gh", "auth", "status"], capture_output=True, text=True)
+        if r.returncode != 0:
+            msg = (r.stderr or r.stdout or "").strip().splitlines()
+            short = msg[0][:80] if msg else "auth check failed"
+            rows.append(("gh", False, short))
+        else:
+            rows.append(("gh", True, "authenticated"))
+
+    # ANTHROPIC_API_KEY
+    key = os.environ.get("ANTHROPIC_API_KEY", "")
+    if key:
+        rows.append(("ANTHROPIC_API_KEY", True, "set"))
+    else:
+        rows.append(
+            ("ANTHROPIC_API_KEY", False, "not set (required for wiki-weaver ingest)")
+        )
+
+    # policy/schema.md
+    pd = _policy_dir()
+    schema = pd / "schema.md" if pd else None
+    if schema and schema.exists():
+        rows.append(("policy/schema.md", True, str(schema)))
+    else:
+        rows.append(("policy/schema.md", False, "not found (reinstall repo-weaver)"))
+
+    # ---- Print table ----
+    col_w = max(len(r[0]) for r in rows) + 2
+    print(f"\n{'Dependency':<{col_w}}  {'Status':<6}  Detail")
+    print("-" * 72)
+    all_ok = True
+    for name, ok, detail in rows:
+        sym = "\u2713" if ok else "\u2717"
+        label = "OK  " if ok else "FAIL"
+        print(f"{name:<{col_w}}  {sym} {label}  {detail}")
+        if not ok:
+            all_ok = False
+    print()
+
+    if all_ok:
+        print("All checks passed.")
+        return 0
+
+    print("Some checks failed.  Install hints:")
+    print("  wiki-weaver : pip install wiki-weaver  OR  uv tool install wiki-weaver")
+    print("  gh          : https://cli.github.com/")
+    return 1
+
+
+# ---------------------------------------------------------------------------
+# Subcommand: init
+# ---------------------------------------------------------------------------
+
+
+def cmd_init(args: argparse.Namespace) -> int:
+    """Scaffold a corpus directory and install the code-fit schema."""
+    corpus = args.corpus_dir
+    repo: Optional[str] = getattr(args, "repo", None)
+
+    # 1. Scaffold via wiki-weaver
+    print(f"[repo-weaver] Initialising wiki at {corpus} ...")
+    r = subprocess.run(["wiki-weaver", "init", corpus, "--plain"])
+    if r.returncode != 0:
+        print(
+            f"ERROR: wiki-weaver init failed (exit {r.returncode})",
+            file=sys.stderr,
+        )
+        return r.returncode
+
+    # 2. Install code-fit schema
+    pd = _policy_dir()
+    if pd:
+        schema_src = pd / "schema.md"
+        policy_dst = Path(corpus) / "policy"
+        policy_dst.mkdir(parents=True, exist_ok=True)
+        schema_dst = policy_dst / "schema.md"
+        shutil.copy2(schema_src, schema_dst)
+        print(f"[repo-weaver] Installed schema: {schema_dst}")
+    else:
+        print(
+            "WARNING: policy/schema.md not found — skipping schema install.",
+            file=sys.stderr,
+        )
+
+    # 3. Save corpus config (repo path + origin URL)
+    cfg: dict[str, str] = {}
+    if repo:
+        repo_abs = str(Path(repo).resolve())
+        cfg["repo"] = repo_abs
+        origin = gitio.get_origin_url(repo_abs)
+        if origin:
+            cfg["origin_url"] = origin
+
+    _save_corpus_config(corpus, cfg)
+    print(f"[repo-weaver] Corpus config: {Path(corpus) / _CORPUS_CONFIG}")
+    print("[repo-weaver] Done.  Run `repo-weaver weave --corpus <dir>` to populate.")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# Subcommand: weave
+# ---------------------------------------------------------------------------
+
+
+def cmd_weave(args: argparse.Namespace) -> int:
+    """Materialise sources and (unless --dry-run) run wiki-weaver ingest."""
+    corpus = args.corpus
+    repo = _resolve_repo(getattr(args, "repo", None), corpus)
+    if not repo:
+        print(
+            "ERROR: --repo is required (or record it via `repo-weaver init --repo PATH`).",
+            file=sys.stderr,
+        )
+        return 1
+
+    return weave_mod.weave(
+        corpus=corpus,
+        repo=repo,
+        since=args.since,
+        until=args.until,
+        max_prs=args.max_prs,
+        max_modules=args.max_modules,
+        dry_run=args.dry_run,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Subcommand: ask
+# ---------------------------------------------------------------------------
+
+
+def cmd_ask(args: argparse.Namespace) -> int:
+    """Pass-through to wiki-weaver ask."""
+    cmd = ["wiki-weaver", "ask", args.question, "--wiki", args.corpus]
+    if args.json:
+        cmd.append("--json")
+    r = subprocess.run(cmd)
+    return r.returncode
+
+
+# ---------------------------------------------------------------------------
+# Subcommand: replay
+# ---------------------------------------------------------------------------
+
+
+def cmd_replay(args: argparse.Namespace) -> int:
+    """Weave successive non-overlapping windows for an over-time corpus build."""
+    corpus = args.corpus
+    repo = _resolve_repo(getattr(args, "repo", None), corpus)
+    if not repo:
+        print(
+            "ERROR: --repo is required (or record it via `repo-weaver init --repo PATH`).",
+            file=sys.stderr,
+        )
+        return 1
+
+    raw_cutoffs = [w.strip() for w in args.windows.split(",") if w.strip()]
+    if not raw_cutoffs:
+        print(
+            "ERROR: --windows must be a non-empty comma-separated list of YYYY-MM-DD dates.",
+            file=sys.stderr,
+        )
+        return 1
+
+    # Validate date format
+    for d in raw_cutoffs:
+        try:
+            date.fromisoformat(d)
+        except ValueError:
+            print(f"ERROR: invalid date in --windows: {d!r}", file=sys.stderr)
+            return 1
+
+    # Determine start: one day before the repo's first commit
+    first = gitio.get_first_commit_date(repo)
+    if first:
+        start = (date.fromisoformat(first) - timedelta(days=1)).isoformat()
+    else:
+        start = "2000-01-01"
+
+    # Build list of (since, until) windows
+    windows = [(start, raw_cutoffs[0])]
+    for i in range(len(raw_cutoffs) - 1):
+        windows.append((raw_cutoffs[i], raw_cutoffs[i + 1]))
+
+    banner_width = 60
+    max_prs: int = getattr(args, "max_prs", 15)
+    max_modules: int = getattr(args, "max_modules", 5)
+
+    for idx, (since, until) in enumerate(windows, 1):
+        print(f"\n{'=' * banner_width}")
+        print(f"  REPLAY WINDOW {idx}/{len(windows)}: {since} \u2192 {until}")
+        print(f"{'=' * banner_width}\n")
+        rc = weave_mod.weave(
+            corpus=corpus,
+            repo=repo,
+            since=since,
+            until=until,
+            max_prs=max_prs,
+            max_modules=max_modules,
+            dry_run=False,
+        )
+        if rc != 0:
+            print(
+                f"\nERROR: ingest failed for window {since} \u2192 {until} "
+                f"(exit {rc}).  Stopping replay.",
+                file=sys.stderr,
+            )
+            return rc
+
+    print("\n[repo-weaver] Replay complete.")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# Argument parser
+# ---------------------------------------------------------------------------
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="repo-weaver",
+        description=(
+            "Turn a git repo's commits and PRs into a queryable wiki corpus via wiki-weaver."
+        ),
+    )
+    parser.add_argument("--version", action="version", version="%(prog)s 0.1.0")
+
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    # ---- doctor ----
+    p = sub.add_parser(
+        "doctor", help="Check all dependencies and exit 1 if any are missing."
+    )
+    p.set_defaults(func=cmd_doctor)
+
+    # ---- init ----
+    p = sub.add_parser("init", help="Scaffold a new corpus directory.")
+    p.add_argument("corpus_dir", help="Directory to create the corpus in.")
+    p.add_argument(
+        "--repo", metavar="PATH", help="Path to the local git repo to track."
+    )
+    p.set_defaults(func=cmd_init)
+
+    # ---- weave ----
+    p = sub.add_parser(
+        "weave",
+        help="Materialise source docs and ingest into the corpus.",
+    )
+    p.add_argument("--corpus", required=True, metavar="DIR", help="Corpus directory.")
+    p.add_argument(
+        "--repo",
+        metavar="PATH",
+        help="Git repo path (overrides the path recorded during init).",
+    )
+    p.add_argument(
+        "--since",
+        metavar="YYYY-MM-DD",
+        help="Window start (exclusive). Default: one day before the repo's first commit.",
+    )
+    p.add_argument(
+        "--until",
+        metavar="YYYY-MM-DD",
+        help="Window end (inclusive, up to 23:59:59). Default: today.",
+    )
+    p.add_argument(
+        "--max-prs",
+        type=int,
+        default=15,
+        metavar="N",
+        help="Max merged PRs to include in the change digest (default: 15).",
+    )
+    p.add_argument(
+        "--max-modules",
+        type=int,
+        default=5,
+        metavar="N",
+        help="Max module snapshot documents to emit (default: 5).",
+    )
+    p.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Write _inbox files but skip wiki-weaver ingest.",
+    )
+    p.set_defaults(func=cmd_weave)
+
+    # ---- ask ----
+    p = sub.add_parser(
+        "ask", help="Ask a question against the corpus (via wiki-weaver ask)."
+    )
+    p.add_argument("question", help="The question to answer.")
+    p.add_argument("--corpus", required=True, metavar="DIR", help="Corpus directory.")
+    p.add_argument(
+        "--json",
+        action="store_true",
+        help="Output JSON: {answer, pages_used, refused}.",
+    )
+    p.set_defaults(func=cmd_ask)
+
+    # ---- replay ----
+    p = sub.add_parser(
+        "replay",
+        help="Weave successive time windows for an over-time corpus build.",
+    )
+    p.add_argument("--corpus", required=True, metavar="DIR", help="Corpus directory.")
+    p.add_argument(
+        "--repo",
+        metavar="PATH",
+        help="Git repo path (overrides the path recorded during init).",
+    )
+    p.add_argument(
+        "--windows",
+        required=True,
+        metavar="DATES",
+        help=(
+            "Comma-separated YYYY-MM-DD cutoff dates (ascending). "
+            "Weaves windows (start, d1], (d1, d2], ..."
+        ),
+    )
+    p.add_argument("--max-prs", type=int, default=15, metavar="N")
+    p.add_argument("--max-modules", type=int, default=5, metavar="N")
+    p.set_defaults(func=cmd_replay)
+
+    return parser
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+
+def main() -> None:
+    """Console script entry point.  Calls sys.exit() with the command's return code."""
+    parser = _build_parser()
+    args = parser.parse_args()
+
+    # Startup check: all commands except doctor require wiki-weaver on PATH.
+    if args.command != "doctor":
+        if shutil.which("wiki-weaver") is None:
+            print(
+                "ERROR: wiki-weaver not found on PATH.\n"
+                "Install with:  pip install wiki-weaver\n"
+                "           OR  uv tool install wiki-weaver",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+    rc = args.func(args)
+    sys.exit(rc if isinstance(rc, int) else 0)
+
+
+if __name__ == "__main__":
+    main()
