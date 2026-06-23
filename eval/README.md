@@ -64,6 +64,115 @@ Outputs land in `--out` (default `./eval-out`), which is git-ignored.
 
 ---
 
+## Reproducing the eval (the 11/11 scorecard)
+
+The eval proves three things about a corpus built from a known repo's history:
+
+1. **Accuracy** — answers state the correct PR numbers, titles, authors, and merge
+   dates (verified against `gh pr view`).
+2. **Groundedness** — concrete claims trace back to the materialized source docs
+   (`trace_grounding.py`).
+3. **Fabrication-refusal** — out-of-scope probes (GraphQL, Kubernetes, message
+   queues) are refused or marked "not covered" rather than answered with invented
+   detail.
+
+The scorecard is **11 questions**: 7 curated (`questions.yaml`) + 4 held-back
+(`held_back.yaml`). The pieces:
+
+- `questions.yaml` — 7 curated ground-truth Q&A pairs (facts verified via `gh`).
+- `held_back.yaml` — 4 held-back Q&A pairs covering areas NOT used to tune the
+  materializer (overfitting guard).
+- `coverage_check.py` — deterministic integrity gate (every source ingested,
+  converged, `_failed/` empty).
+- `run_questions.py` — fires the asks and saves raw answers.
+- `trace_grounding.py` — classifies each concrete claim GROUNDED /
+  SYNTHESIZED_ONLY / UNGROUNDED.
+
+### Pin the dependency
+
+The score is only reachable when **wiki-weaver is the current `main`** — it must
+include the import fix merged in **PR #3**. Install/refresh it before building the
+corpus:
+
+```bash
+uv tool install --force git+https://github.com/microsoft/amplifier-bundle-wiki-weaver
+repo-weaver doctor   # confirm wiki-weaver + git + gh + provider key are all green
+```
+
+### Step 1 — clone the subject repo
+
+The subject the eval was built and verified against is
+`microsoft/amplifier-app-team-pulse`:
+
+```bash
+gh repo clone microsoft/amplifier-app-team-pulse ~/src/amplifier-app-team-pulse
+```
+
+### Step 2 — build the corpus with `replay`
+
+Scaffold a corpus pointed at the clone, then weave the windows that cover the PRs
+the questions reference (all merged 2026-06-15 through 2026-06-22):
+
+```bash
+repo-weaver init ~/corpora/team-pulse --repo ~/src/amplifier-app-team-pulse
+
+repo-weaver replay --corpus ~/corpora/team-pulse \
+  --windows "2026-06-15,2026-06-19,2026-06-22"
+```
+
+`replay` tiles gapless windows starting one day before the repo's first commit, so
+`(start, 2026-06-15]`, `(2026-06-15, 2026-06-19]`, `(2026-06-19, 2026-06-22]`
+cover every referenced PR. **Ingest is sequential and can take several minutes per
+source** — see the cost/time note in the top-level README.
+
+### Step 3 — gate corpus integrity
+
+```bash
+python -m eval.coverage_check --corpus ~/corpora/team-pulse
+```
+
+Must PASS (every registered source ingested + converged, `_failed/` empty) before
+the answers mean anything.
+
+### Step 4 — run both question sets
+
+```bash
+# Curated (7)
+python -m eval.run_questions \
+  --corpus    ~/corpora/team-pulse \
+  --questions eval/questions.yaml \
+  --out       ./eval-out
+
+# Held-back (4)
+python -m eval.run_questions \
+  --corpus    ~/corpora/team-pulse \
+  --questions eval/held_back.yaml \
+  --out       ./eval-out-held-back
+```
+
+### Step 5 — trace grounding on the answers
+
+Run the tracer on each answer file produced above, e.g.:
+
+```bash
+python -m eval.trace_grounding \
+  --corpus ~/corpora/team-pulse \
+  --answer ./eval-out/answers/pr72-projection-synthesis.json
+```
+
+Add `--fail-under 0.5` to turn it into a hard gate on `grounded_rate`.
+
+### Reading the result
+
+Results are **nondeterministic** — wiki-weaver synthesis is LLM-driven, so exact
+wording varies run to run. The PASS criteria are about **correct facts and
+citations** and **refusing out-of-scope questions**, NOT verbatim string match.
+`trace_grounding.py` is a heuristic (exact-substring) first pass that surfaces
+candidates; the final accuracy/fabrication verdict is adjudicated by the judge
+agent against the `expected:` items in each YAML entry.
+
+---
+
 ## Overfitting Guard — `held_back.yaml`
 
 The materialiser was tuned against `questions.yaml` (frontend-toolchain evolution,

@@ -1,31 +1,51 @@
 # repo-weaver
 
-Turn a git repo's commits and PR history into markdown source documents, then feed them to **wiki-weaver** to build a queryable, cited knowledge corpus.
+repo-weaver turns one or more git repositories' **commits and merged PRs** into
+markdown source documents, then feeds them to **wiki-weaver** (an LLM synthesis
+engine) to build a queryable, cited knowledge corpus that is woven together over
+time. repo-weaver is the git-history materializer and orchestration layer;
+wiki-weaver does the synthesis, reconciliation, citation, and query.
 
-`wiki-weaver` is the engine (LLM synthesis pipeline). `repo-weaver` is the git-source materializer and orchestration layer on top. Everything downstream — synthesis, reconciliation, validation, citation, query — is handled by wiki-weaver unchanged.
-
----
-
-## Install
-
-**Requirements:** Python ≥ 3.11, `wiki-weaver` on PATH, `git` on PATH, `gh` on PATH with `gh auth login` done, `ANTHROPIC_API_KEY` set.
-
-```bash
-# From the repo-weaver directory:
-pip install -e .
-# or
-uv tool install --editable .
-```
-
-Run `repo-weaver doctor` after install to verify all dependencies.
+**Personal vs team is just which repos are in the corpus.** A *personal* corpus
+tracks your own repos; a *team* corpus tracks a shared set. There is no separate
+mode or config — you point `init` at one repo or several, and the corpus is
+"personal" or "team" purely by virtue of what you put in it.
 
 ---
 
-## Commands
+## How it works
 
-### `repo-weaver doctor`
+- **Materialize git history** — for each time window, repo-weaver emits a per-repo
+  change digest (merged PRs split into substantive vs routine, plus a
+  commit-volume summary) and up to `--max-modules` per-module snapshots (purpose,
+  file inventory at window-end, and what changed). The target repo is never
+  mutated.
+- **wiki-weaver ingest** — the generated documents are written to `<corpus>/_inbox/`
+  and handed to `wiki-weaver ingest`, the synthesis engine repo-weaver depends on.
+- **A cited wiki** — wiki-weaver compiles the sources into wiki pages where every
+  claim cites a source id. You query it with `repo-weaver ask`.
+- **`replay` weaves updates in over time** — running successive windows adds each
+  period's new history into the *existing* pages (modules accrue a History
+  section) rather than overwriting, so the corpus reads as the repo's evolution.
 
-Checks all hard requirements and prints a status table. Exits 1 if anything is missing.
+---
+
+## Requirements
+
+Run `repo-weaver doctor` **first** — it checks every item below and exits non-zero
+if anything is missing. A green doctor means the long ingest run will not die
+partway through on a missing key.
+
+| Requirement | How to satisfy | Notes |
+|-------------|----------------|-------|
+| **wiki-weaver** on PATH | `uv tool install git+https://github.com/microsoft/amplifier-bundle-wiki-weaver` | The install fix landed in **PR #3 (now merged to main)**, so a fresh install works. |
+| **git** on PATH | system package manager | repo-weaver shells out to `git`; it is never imported. |
+| **gh** authenticated | install from <https://cli.github.com/>, then `gh auth login` | Verify with `gh auth status`. PR data is fetched via `gh`. |
+| **LLM provider key** | `export GOOGLE_API_KEY=<your-key>` | `GOOGLE_API_KEY` is the primary key used by wiki-weaver ingest/ask in this environment. `ANTHROPIC_API_KEY` may be the alternative depending on the wiki-weaver backend. |
+
+`doctor` also confirms the packaged `policy/schema.md` is present (it ships inside
+the repo-weaver package). All commands except `doctor` refuse to run if
+wiki-weaver is not on PATH.
 
 ```bash
 repo-weaver doctor
@@ -33,88 +53,157 @@ repo-weaver doctor
 
 ---
 
-### `repo-weaver init <corpus_dir> [--repo PATH]`
+## Install
 
-Scaffolds a wiki corpus via `wiki-weaver init --plain`, then installs the code-fit `policy/schema.md`. Records the repo path for future commands.
+repo-weaver is an **unpublished local project** — there is no PyPI release. The
+supported, documented path is an editable install from a clone:
 
 ```bash
-repo-weaver init ~/corpora/my-project --repo ~/src/my-project
+git clone <repo-weaver-url>
+cd repo-weaver
+uv tool install --editable .
+```
+
+The packaged `policy/schema.md` now ships inside the wheel, so a non-editable
+install (`uv tool install .`) also works — but **editable-from-clone is the
+documented path**. After installing, verify everything:
+
+```bash
+repo-weaver doctor
 ```
 
 ---
 
-### `repo-weaver weave --corpus DIR [options]`
+## Quickstart (single repo, small and cheap)
 
-Materializes source documents for the given time window, writes them to `<corpus>/_inbox/`, and calls `wiki-weaver ingest` (unless `--dry-run`).
+Start with one repo and a short window so the first run is fast and inexpensive.
 
 ```bash
-# Dry run: inspect generated source docs before spending LLM time
-repo-weaver weave --corpus ~/corpora/my-project \
-  --repo ~/src/my-project \
-  --since 2026-06-01 --until 2026-06-16 \
-  --dry-run
+# 1. Verify dependencies (do this first)
+repo-weaver doctor
 
-# Real ingest
-repo-weaver weave --corpus ~/corpora/my-project \
-  --since 2026-06-01 --until 2026-06-16
+# 2. Scaffold a corpus pointed at a local clone
+repo-weaver init ~/corpora/team-pulse --repo ~/src/amplifier-app-team-pulse
+
+# 3. Weave one short window, capping modules to keep it cheap
+repo-weaver weave --corpus ~/corpora/team-pulse \
+  --since 2026-06-15 --until 2026-06-19 \
+  --max-modules 1
+
+# 4. Ask a cited question against the corpus
+repo-weaver ask "What did PR #96 add?" --corpus ~/corpora/team-pulse
 ```
 
-**Options:**
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--corpus DIR` | required | Corpus directory (from `init`) |
-| `--repo PATH` | from init config | Git repo to materialize from |
-| `--since YYYY-MM-DD` | repo's first commit | Window start (exclusive) |
-| `--until YYYY-MM-DD` | today | Window end (inclusive) |
-| `--max-prs N` | 15 | Max merged PRs to include |
-| `--max-modules N` | 5 | Max module snapshot docs |
-| `--dry-run` | false | Write _inbox but skip ingest |
-
-**What gets generated per window:**
-
-1. **`<until>-changes.md`** — a change digest: merged PRs with titles, authors, trimmed bodies, file counts; plus a commit-volume summary per top-level directory.
-2. **Up to `--max-modules` `module-<slug>.md` files** — snapshots of the most-changed top-level directories in the window, each with: inferred or README-derived purpose, file inventory at window-end, and a summary of what changed.
-
-Module snapshots are regenerated each window. If the module changed, its content changes, so wiki-weaver re-ingests and updates the page. Unchanged modules produce identical bytes and are correctly skipped by dedup.
+`--since` is exclusive, `--until` is inclusive (through 23:59:59). If you omit
+`--since`, repo-weaver defaults to one day before the repo's first commit; if you
+omit `--until`, it defaults to today. Add `--dry-run` to `weave` to write the
+`_inbox/` files and inspect them **without** spending any LLM time.
 
 ---
 
-### `repo-weaver ask "<question>" --corpus DIR [--json]`
+## Multi-repo (personal vs team)
 
-Pass-through to `wiki-weaver ask`. Returns a cited answer from the compiled corpus.
+Register several repos at `init` by repeating `--repo`:
 
 ```bash
-repo-weaver ask "What does the synthesis-pipeline module do?" --corpus ~/corpora/my-project
-repo-weaver ask "Why was the M365 sync added?" --corpus ~/corpora/my-project --json
+repo-weaver init ~/corpora/my-team \
+  --repo ~/src/amplifier-app-team-pulse \
+  --repo ~/src/amplifier-bundle-wiki-weaver
 ```
+
+Then `weave` / `replay` **with no `--repo` flag** cover every repo recorded in the
+corpus config:
+
+```bash
+repo-weaver weave --corpus ~/corpora/my-team --since 2026-06-15 --until 2026-06-22
+```
+
+In multi-repo mode, every filename and document body is **repo-qualified** (e.g.
+`module-amplifier-app-team-pulse-frontend-2026-06-22.md`) so wiki-weaver never
+merges pages from different repos and citations always point back to the right
+source. Passing an explicit `--repo` overrides the config and uses the historic
+single-repo, unqualified-filename behavior. An invalid or unreachable repo aborts
+the whole multi-repo run loudly rather than producing phantom-empty entries.
 
 ---
 
-### `repo-weaver replay --corpus DIR --windows "D1,D2,..." [options]`
+## Over time (replay)
 
-**The over-time demo.** Given sorted cutoff dates, weaves successive non-overlapping windows so each run adds only that window's new material. wiki-weaver merges each batch into the existing corpus pages, so the final corpus reads as a temporal history of the repo.
+`replay` tiles a list of cutoff dates into **gapless** windows and weaves them in
+order, so each window adds only its new history into the existing pages:
 
 ```bash
-repo-weaver replay \
-  --corpus ~/corpora/my-project \
-  --repo ~/src/my-project \
-  --windows "2026-04-01,2026-05-01,2026-06-01,2026-06-16"
+repo-weaver replay --corpus ~/corpora/team-pulse \
+  --windows "2026-06-15,2026-06-19,2026-06-22"
 ```
 
-Each window `(d_i, d_{i+1}]` is ingested in order. On first failure, replay stops (fail loud).
+The start is computed automatically as one day before the earliest first commit
+across the configured repos, producing windows `(start, 2026-06-15]`,
+`(2026-06-15, 2026-06-19]`, `(2026-06-19, 2026-06-22]`. Cutoff dates must be
+`YYYY-MM-DD` and ascending. Re-running `replay` weaves newer history into the
+pages that already exist. On the first window that fails, replay stops (fail
+loud).
 
 ---
 
-## The over-time replay idea
+## Cost and time expectations (be honest)
 
-A single `weave` call materializes a snapshot. `replay` is what turns the corpus into a living history:
+- **Ingest is sequential.** wiki-weaver processes one source at a time; budget
+  roughly **5–10 minutes per source**. A *source* is a per-repo change digest
+  **or** a single module snapshot — so one window of one repo with
+  `--max-modules 5` is up to 6 sources.
+- **LLM calls cost money.** Every source is one or more synthesis calls against
+  your provider key.
+- **Many-repo or long-window runs can take HOURS.** A multi-repo `replay` over
+  many windows multiplies sources by windows by repos.
 
-- Each replay window adds only that period's PRs and module state.
-- wiki-weaver's page reconciler sees a module page already exists and adds the new state with a citation, rather than overwriting.
-- Ask questions like "How did the frontend module evolve between April and June?" and get a cited, time-aware answer.
+**Recommendation:** start with **one repo, a short window, and `--max-modules 1`**.
+Scale up only once you have seen the corpus quality and the per-source timing.
 
-This is the intended mechanism for tracking a repo's evolution over time without re-ingesting everything on each run.
+Two knobs tune the ingest behavior:
+
+| Flag | Default | What it does |
+|------|---------|--------------|
+| `--max-cycles N` | 4 | Digest cycle budget passed to `wiki-weaver ingest`. Raise for dense repos that do not converge in the default budget. |
+| `--max-retries N` | 3 | Per-source retry attempts after a `_failed/` event. Transient provider errors (overloaded, rate limit, timeout, 429/500/503/504/529) auto-retry with exponential back-off; not-converged sources retry with a bumped cycle budget; permanent errors (auth, 404, unrecognised text) are **not** retried and fail loud. |
+
+`--max-prs` (default 15) and `--max-modules` (default 5) cap how much history each
+window materializes.
+
+---
+
+## Troubleshooting
+
+- **`doctor` reports a failure.** Fix the named row before any long run:
+  - *GOOGLE_API_KEY not set* → `export GOOGLE_API_KEY=<your-key>` (or set
+    `ANTHROPIC_API_KEY` if your wiki-weaver backend uses it).
+  - *gh not authenticated* → `gh auth login`, confirm with `gh auth status`.
+  - *wiki-weaver not found on PATH* → install it (see Requirements).
+- **A source lands in `_failed/`.** weave auto-retries transient provider errors
+  (back-off) and not-converged sources (more cycles), but fails loud on permanent
+  errors and leaves them in `_failed/` with a named summary on stderr. Inspect
+  `_failed/` and `.processed.jsonl` for the diagnostic text.
+- **Check corpus integrity** with the deterministic gate:
+  ```bash
+  python -m eval.coverage_check --corpus ~/corpora/team-pulse
+  ```
+  It PASSes only when every registered source was ingested, has a converged
+  ledger entry, and `_failed/` is empty.
+
+---
+
+## Known limitations
+
+- **Unpublished / local install only.** No PyPI release; editable-from-clone is
+  the supported path.
+- **Single-subject eval.** The eval harness (`eval/`) is built and verified
+  against one subject repo (`microsoft/amplifier-app-team-pulse`).
+- **No resume-from-checkpoint.** A partial multi-hour run cannot resume from where
+  it stopped; re-running re-weaves the windows (already-ingested identical sources
+  are deduped by wiki-weaver, but the run restarts from the top).
+- **Corpus quality depends on PR/commit density** in the window. A window with few
+  or no merged PRs yields a thin digest; areas without READMEs get an inferred
+  (clearly marked) module purpose.
 
 ---
 
@@ -122,12 +211,15 @@ This is the intended mechanism for tracking a repo's evolution over time without
 
 ```
 repo-weaver/
-  cli.py          # argparse subcommand dispatch; main() -> exit code
-  gitio.py        # read-only git + gh subprocess helpers
-  materialize.py  # window -> list of (filename, markdown) source docs
-  weave.py        # orchestrate: materialize -> _inbox -> wiki-weaver ingest
-  policy/
-    schema.md     # code-fit page taxonomy (copied into corpus on init)
+  repo_weaver/
+    cli.py          # argparse subcommand dispatch; main() -> exit code
+    gitio.py        # read-only git + gh subprocess helpers
+    materialize.py  # window -> list of (filename, markdown) source docs
+    weave.py        # orchestrate: materialize -> _inbox -> wiki-weaver ingest (+ retry)
+    policy/
+      schema.md     # code-fit page taxonomy (copied into the corpus on init)
+  eval/             # quality harness (see eval/README.md)
 ```
 
-repo-weaver shells out to `wiki-weaver`, `git`, and `gh` — it never imports them as Python libraries and never mutates a repo's working tree.
+repo-weaver shells out to `wiki-weaver`, `git`, and `gh` — it never imports them
+as Python libraries and never mutates a repo's working tree.
