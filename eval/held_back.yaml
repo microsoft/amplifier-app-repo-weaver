@@ -1,0 +1,68 @@
+# Eval harness — HELD-BACK / overfitting-guard Q&A set
+#
+# PURPOSE: These questions cover areas that were NOT used to tune the materializer
+# (the materializer fix targeted change-digest separation of routine vs substantive
+# PRs and the frontend-toolchain area).  They act as an overfitting guard: if the
+# corpus pipeline generalises correctly the answers should still be accurate.
+#
+# AVOID: frontend-toolchain questions (see eval/questions.yaml for those).
+#
+# Facts verified 2026-06-22 via:
+#   gh pr view <N> --repo microsoft/amplifier-app-team-pulse --json number,title,author,mergedAt
+#
+# Results (all correct as reported by gh — no corrections needed):
+#   PR #72  bkrabach  2026-06-16  feat(m365-sync): team-appropriate projection + faithful synthesis (rich private wiki, projection as sole safety filter)
+#   PR #96  bkrabach  2026-06-19  feat(m365-sync): Teams meeting-recording transcript ingestion
+#   PR #97  bkrabach  2026-06-19  feat(m365-sync): unified source picker — interleaved chats + recordings, favorites/ledger, dual range controls
+#   PR #104 samueljklee 2026-06-19  ci(review): self-improving PR-review loop on the attractor pipeline
+#   PR #112 samueljklee 2026-06-22  feat(review): steer the loop toward a token-cheap rubric + add an out-of-scope lever
+#   PR #122 samueljklee 2026-06-22  ci(review): run improve-pr-review daily (temporary accuracy stress-test)
+#   PR #125 samueljklee 2026-06-22  fix(eval): honest accuracy scorecard — drop title-consistency, instrument runs, oracle-as-gate
+#   PR #127 samueljklee 2026-06-22  docs: self-learning PR-review loop diagram + freshness rule
+#   PR #73  samueljklee 2026-06-18  feat(ask): M1 — /ask online-generation doorway over shared run_ask
+#   PR #109 samueljklee 2026-06-22  feat(lens): serve any registered folder as a content collection (md+json)
+#
+# Format note: parsed by eval/run_questions.py using stdlib only.
+# Keep all string values on a single line; quote values that contain colons.
+
+questions:
+  - id: hb-m365-sync-evolution
+    kind: evolution
+    must_cite: true
+    question: "How did team-pulse's M365 data ingestion evolve across PRs #72, #96, and #97 — what capability did each add, and who authored them?"
+    expected:
+      - "PR #72 (bkrabach, 2026-06-16): introduced team-appropriate projection — private wiki kept rich/complete, projection as sole team-safety filter"
+      - "PR #96 (bkrabach, 2026-06-19): added Teams meeting-recording transcript ingestion"
+      - "PR #97 (bkrabach, 2026-06-19): replaced separate chat/recording sections with a unified source picker (interleaved, date-sorted, with favorites/ledger)"
+      - "All three PRs authored by bkrabach"
+
+  - id: hb-pr-review-loop
+    kind: content
+    must_cite: true
+    question: "Describe team-pulse's self-improving PR-review loop: which PRs introduced and evolved it, who authored them, and what were the key milestones?"
+    expected:
+      - "PR #104 (samueljklee, 2026-06-19): ci(review): self-improving PR-review loop on the attractor pipeline — introduced the loop"
+      - "PR #112 (samueljklee, 2026-06-22): feat(review): steer the loop toward a token-cheap rubric + add an out-of-scope lever"
+      - "PR #122 (samueljklee, 2026-06-22): ci(review): run improve-pr-review daily (temporary accuracy stress-test)"
+      - "PR #125 (samueljklee, 2026-06-22): fix(eval): honest accuracy scorecard — drop title-consistency, instrument runs, oracle-as-gate"
+      - "PR #127 (samueljklee, 2026-06-22): docs: self-learning PR-review loop diagram + freshness rule"
+      - "All five PRs authored by samueljklee"
+
+  - id: hb-ask-endpoint-and-lens
+    kind: content
+    must_cite: true
+    question: "What did PR #73 introduce as team-pulse's /ask endpoint, and what did PR #109 add to the lens content-collection API?"
+    expected:
+      - "PR #73 (samueljklee, 2026-06-18): feat(ask): M1 — /ask online-generation doorway over shared run_ask"
+      - "PR #73 introduced the /ask online-generation endpoint using a shared run_ask implementation"
+      - "PR #109 (samueljklee, 2026-06-22): feat(lens): serve any registered folder as a content collection (md+json)"
+      - "PR #109 generalised the lens API so any registered folder can be served as a content collection"
+      - "Both PRs authored by samueljklee"
+
+  - id: fabrication-probe-message-queue
+    kind: fabrication-probe
+    must_cite: false
+    question: "Which message queue — Kafka, RabbitMQ, or Redis Streams — does team-pulse use for background job processing?"
+    expected:
+      - "NOT COVERED — no evidence of a message queue (Kafka, RabbitMQ, Redis Streams) in the corpus"
+      - "Corpus must refuse or say not covered; fabricating message-queue details is a hard failure"
