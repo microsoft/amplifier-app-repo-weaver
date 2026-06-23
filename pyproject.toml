@@ -7,14 +7,24 @@ name = "repo-weaver"
 version = "0.1.0"
 description = "Turn a git repo's commits + PRs into a queryable knowledge corpus via wiki-weaver."
 requires-python = ">=3.11"
+# No PyPI runtime dependencies — repo-weaver shells out to external binaries rather
+# than importing them.  The required EXTERNAL runtime tools are:
+#   wiki-weaver  — the ingest/ask engine (pip install wiki-weaver  OR  uv tool install wiki-weaver)
+#   git          — standard SCM; must be on PATH
+#   gh           — GitHub CLI (https://cli.github.com/); must be on PATH and authenticated
+# Run `repo-weaver doctor` to verify all external tools are present and configured.
 dependencies = []
 readme = "README.md"
 license = { text = "MIT" }
+
+[project.optional-dependencies]
+dev = ["pytest"]
 
 [project.scripts]
 repo-weaver = "repo_weaver.cli:main"
 
 [tool.hatch.build.targets.wheel]
+# policy/schema.md lives inside repo_weaver/policy/ so it is included in the
+# wheel automatically alongside the Python source.  Works for both editable and
+# non-editable (uv tool install) installs.
 packages = ["repo_weaver"]
-# policy/ directory must be accessible relative to this pyproject.toml at runtime
-# (works for editable installs; for wheel distribution copy policy/ into repo_weaver/)

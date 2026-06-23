@@ -321,6 +321,9 @@ def _build_change_digest(
     The ``max_prs`` parameter controls how many PRs are fetched from GitHub
     (used as a scaling hint).  All substantive PRs within that fetched pool are
     shown; only routine ones are collapsed.
+
+    gh errors are shown explicitly so callers never mistake a fetch failure for
+    genuine zero-PR activity.
     """
     parts: list[str] = []
     parts.append(f"# Changes: {since} \u2192 {until}\n\n")
@@ -333,11 +336,21 @@ def _build_change_digest(
     # trade one class against the other.
     fetch_cap = min(max(max_prs * 8, 80), 200)
     prs: list[dict[str, object]] = []
+    gh_error: Optional[str] = None
     if owner_repo:
         owner, name = owner_repo
-        prs = gitio.gh_merged_prs(f"{owner}/{name}", since, until, max_fetch=fetch_cap)
+        prs, gh_error = gitio.gh_merged_prs(
+            f"{owner}/{name}", since, until, max_fetch=fetch_cap
+        )
 
-    if prs:
+    if gh_error:
+        # gh failed — surface the error explicitly so it's never mistaken for
+        # genuine zero-PR activity (callers can distinguish the two cases).
+        parts.append(
+            "## Pull Requests\n\n"
+            f"_({gh_error} \u2014 PR data could not be fetched for this window.)_\n\n"
+        )
+    elif prs:
         substantive: list[dict[str, object]] = [p for p in prs if not _is_routine_pr(p)]
         routine: list[dict[str, object]] = [p for p in prs if _is_routine_pr(p)]
 
@@ -374,9 +387,9 @@ def _build_change_digest(
             parts.append("_(None in this window.)_\n\n")
 
     else:
+        # gh ran fine; zero PRs in window (or no GitHub remote configured)
         parts.append(
-            "## Merged Pull Requests\n\n"
-            "_(None found in this window, or gh CLI unavailable.)_\n\n"
+            "## Merged Pull Requests\n\n_(No merged PRs found in this window.)_\n\n"
         )
 
     # ---- Commit-volume summary ----
@@ -548,6 +561,10 @@ def _build_module_doc(
     ``# Module: <path> (<repo>)`` and a **Repository** line is injected
     so the synthesizer treats modules with the same path but different repos
     as distinct pages rather than merging them.
+
+    When ``until_rev`` is ``None`` (window predates the repo's first commit),
+    the file-inventory and README sections are skipped — this avoids snapshotting
+    the current HEAD state as if it were the historical state at ``until``.
     """
     parts: list[str] = []
     if repo_qualifier:

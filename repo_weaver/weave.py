@@ -13,12 +13,15 @@ delegates to it so single-repo behaviour is bit-for-bit identical.
 **Resilience** — after every ``wiki-weaver ingest`` call the ``_failed/``
 directory is inspected and any stranded sources are automatically retried:
 
-* **TRANSIENT** (overloaded / api / timeout / 4xx-5xx) → exponential
-  back-off, same cycle budget.  On the final attempt the cycle budget is
-  also bumped as a belt-and-suspenders measure.
+* **TRANSIENT** (overloaded / api / timeout / named HTTP 4xx-5xx codes) →
+  exponential back-off, same cycle budget.  On the final attempt the cycle
+  budget is also bumped as a belt-and-suspenders measure.
 * **NOT-CONVERGED** (cycle cap hit) → no back-off; ``--max-cycles`` is
   increased by ``_DEFAULT_CYCLES_BUMP`` on each attempt.
-* **UNKNOWN** → treated as transient.
+* **PERMANENT** (auth errors, permission denied, 404, or any unrecognised
+  error text) → NOT retried; fail loud immediately.
+* **UNKNOWN** (no diagnostic text yet) → treated as transient for the first
+  attempt so we can gather more information from the per-source run.
 
 If a source is still in ``_failed/`` after all retries a loud named summary
 is printed to stderr and the exit code is non-zero.
@@ -27,6 +30,7 @@ is printed to stderr and the exit code is non-zero.
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 import time
@@ -56,16 +60,27 @@ _DEFAULT_RETRY_BASE_DELAY: float = 5.0
 #: Extra cycles added per retry attempt for NOT-CONVERGED sources.
 _DEFAULT_CYCLES_BUMP: int = 2
 
-# Substrings (lower-cased) that indicate a *transient* provider error.
-_TRANSIENT_MARKERS: tuple[str, ...] = (
-    "overloaded_error",
-    "api_error",
+# ---------------------------------------------------------------------------
+# Failure classification — EXPLICIT ALLOWLIST
+#
+# Only the patterns below are considered transient (safe to retry).
+# Anything else → 'permanent' → DO NOT retry; fail loud immediately.
+# ---------------------------------------------------------------------------
+
+# Substrings (lower-cased) that definitively indicate a *transient* provider
+# error.  These are long enough to be unambiguous without word-boundary checks.
+_TRANSIENT_TEXT_MARKERS: tuple[str, ...] = (
+    "overloaded_error",  # Anthropic/provider overloaded error type
+    "overloaded",  # provider overloaded message text
     "internal server error",
+    "api_error",
+    "rate limit",
     "timeout",
-    "429",
-    "500",
-    "529",
 )
+
+# HTTP status codes that indicate transient server-side conditions.
+# Uses word-boundary matching so "4294" does NOT match "429", etc.
+_TRANSIENT_CODE_RE: re.Pattern[str] = re.compile(r"\b(429|500|503|504|529)\b")
 
 # Substrings (lower-cased) that indicate a *convergence* failure.
 _CONVERGE_MARKERS: tuple[str, ...] = (
@@ -130,24 +145,51 @@ def _classify_failure(
     corpus_path: Path,
     captured_output: str = "",
 ) -> str:
-    """Classify a ``_failed/`` source as ``'not_converged'`` or ``'transient'``.
+    """Classify a ``_failed/`` source as ``'not_converged'``, ``'transient'``, or ``'permanent'``.
+
+    Uses an **explicit allowlist**: only returns ``'transient'`` for named,
+    tested markers; returns ``'permanent'`` when there is diagnostic text that
+    does not match any known transient/convergence pattern.  This prevents
+    unknown errors from being silently retried and hiding root causes.
+
+    When *no* diagnostic text is available (empty captured output and no
+    ledger entry), returns ``'transient'`` as a safe one-shot default so the
+    first per-source retry can gather real diagnostic output.
 
     Checks *captured_output* first (from the most-recent per-source ingest
-    call), then falls back to the ``.processed.jsonl`` ledger.  When text
-    is ambiguous the safe default is ``'transient'``; the cycle budget is
-    also bumped on the final attempt via the caller's belt-and-suspenders
-    logic.
+    call), then falls back to the ``.processed.jsonl`` ledger.
+
+    Classification priority:
+    1. ``'not_converged'`` — cycle-cap markers present (different remedy).
+    2. ``'transient'``     — explicit named transient markers present.
+    3. ``'transient'``     — no diagnostic text yet (first-run safe default).
+    4. ``'permanent'``     — text is present but matches no known pattern.
     """
     text = (
-        captured_output + "\n" + _read_ledger_for_source(corpus_path, source_name)
-    ).lower()
+        (captured_output + "\n" + _read_ledger_for_source(corpus_path, source_name))
+        .lower()
+        .strip()
+    )
+
+    # With no text we cannot classify — treat as transient to gather info.
+    if not text:
+        return "transient"
 
     # Convergence markers take priority — different remedy than transient.
     if any(m in text for m in _CONVERGE_MARKERS):
         return "not_converged"
-    if any(m in text for m in _TRANSIENT_MARKERS):
+
+    # Explicit transient text markers (long enough to be unambiguous).
+    if any(m in text for m in _TRANSIENT_TEXT_MARKERS):
         return "transient"
-    return "transient"  # safe default
+
+    # Numeric HTTP codes with word-boundary matching (avoids "4294" → "429").
+    if _TRANSIENT_CODE_RE.search(text):
+        return "transient"
+
+    # Diagnostic text present but no known transient/convergence pattern →
+    # treat as permanent: do NOT retry, fail loud.
+    return "permanent"
 
 
 def _retry_failed_sources(
@@ -167,7 +209,14 @@ def _retry_failed_sources(
       attempt cycles are also bumped as belt-and-suspenders.
     * **NOT-CONVERGED** — no back-off; ``--max-cycles`` grows by
       *cycles_bump* on each attempt.
-    * **UNKNOWN** — treated as transient.
+    * **PERMANENT** — not retried; left in ``_failed/`` and reported loudly.
+    * **UNKNOWN** (no text yet) — treated as transient for one attempt.
+
+    **Stranded-in-inbox detection**: after each per-source ingest attempt the
+    source must be in ``_archive/`` (success) or back in ``_failed/``
+    (failure).  If it is found in neither location (e.g. wiki-weaver crashed
+    mid-run leaving it in ``_inbox/``), it is rescued back to ``_failed/`` and
+    classified as permanent — no further retries.
 
     Each retry emits a progress line: source, attempt N/M, reason,
     back-off seconds, cycle budget.
@@ -182,6 +231,7 @@ def _retry_failed_sources(
     corpus_path = Path(corpus)
     failed_dir = corpus_path / "_failed"
     inbox = corpus_path / "_inbox"
+    archive_dir = corpus_path / "_archive"
     inbox.mkdir(parents=True, exist_ok=True)
 
     if not failed_dir.exists():
@@ -213,15 +263,24 @@ def _retry_failed_sources(
             state = source_state.setdefault(
                 source_name, {"attempts": 0, "last_reason": "transient"}
             )
-            state["attempts"] = state["attempts"] + 1
             reason = str(state["last_reason"])
+
+            # Permanent failures: skip immediately, leave in _failed/.
+            if reason == "permanent":
+                print(
+                    f"[repo-weaver] SKIP  source={source_name!r}  "
+                    f"attempt={attempt}/{max_retries}  reason=permanent (not retrying)",
+                )
+                continue
+
+            state["attempts"] = state["attempts"] + 1
 
             # Compute delay and cycle budget for this attempt.
             if reason == "not_converged":
                 delay = 0.0
                 cycles = max_cycles + (attempt - 1) * cycles_bump
             else:
-                # transient or unknown
+                # transient or initial unknown
                 delay = retry_base_delay * (2 ** (attempt - 1))
                 cycles = max_cycles
                 # Last attempt: also bump cycles (belt-and-suspenders).
@@ -257,16 +316,52 @@ def _retry_failed_sources(
             print(f"[repo-weaver] Running: {' '.join(cmd)}")
             _rc, output = _tee_subprocess(cmd)
 
-            # Re-classify from fresh output + ledger for the next round.
-            if (failed_dir / source_name).exists():
+            # ---- Determine outcome ----
+            in_failed = (failed_dir / source_name).exists()
+            in_archive = archive_dir.exists() and (archive_dir / source_name).exists()
+
+            if in_failed:
+                # Still in _failed/: reclassify for the next round.
                 new_reason = _classify_failure(source_name, corpus_path, output)
                 state["last_reason"] = new_reason
-            else:
+                if new_reason == "permanent":
+                    print(
+                        f"\n[repo-weaver] PERMANENT FAILURE  source={source_name!r}: "
+                        f"{output[:300].strip()}",
+                        file=sys.stderr,
+                    )
+            elif in_archive:
+                # Moved to _archive/ → genuine success.
                 print(
                     f"[repo-weaver] OK  source={source_name!r} "
                     f"converged on attempt {attempt}."
                 )
                 state["last_reason"] = "success"
+            else:
+                # Source is in neither _failed/ nor _archive/.
+                # Likely stranded in _inbox/ (wiki-weaver crashed mid-run).
+                in_inbox = (inbox / source_name).exists()
+                loc = (
+                    "_inbox/ (wiki-weaver may have crashed mid-run)"
+                    if in_inbox
+                    else "unknown location"
+                )
+                print(
+                    f"\n[repo-weaver] ERROR: source={source_name!r} stranded in {loc} "
+                    f"after wiki-weaver exit — not archived, not failed. "
+                    "Treating as permanent failure.",
+                    file=sys.stderr,
+                )
+                # Rescue: move back to _failed/ so the final report counts it.
+                if in_inbox:
+                    (inbox / source_name).rename(failed_dir / source_name)
+                else:
+                    # Create a sentinel entry so the final loop catches it.
+                    (failed_dir / source_name).write_text(
+                        "# sentinel: stranded after wiki-weaver exit\n",
+                        encoding="utf-8",
+                    )
+                state["last_reason"] = "permanent"
 
     # ---- Final report ----
     still_failed = (
@@ -381,6 +476,15 @@ def weave(
     Returns:
         Exit code: 0 = success, non-zero = failure.
     """
+    # ---- Validate repo ----
+    if not gitio.is_git_repo(repo):
+        print(
+            f"ERROR: repo is not a valid git repository or is unreachable: {repo!r}\n"
+            "Check that the path exists and is inside a git working tree.",
+            file=sys.stderr,
+        )
+        return 1
+
     # ---- Resolve date defaults ----
     today = date.today().isoformat()
     if until is None:
@@ -458,6 +562,10 @@ def weave_multi(
     same log output).
 
     When *repos* contains more than one entry:
+      * Each repo is validated before materialisation (``git rev-parse
+        --is-inside-work-tree``).  An invalid/unreachable repo aborts the
+        entire run loudly — a corpus with phantom-empty entries is worse
+        than a hard stop.
       * Each repo is materialised with a ``repo_qualifier`` equal to
         ``Path(repo).name`` (the directory base-name, e.g.
         ``"amplifier-app-team-pulse"``).  This qualifier is injected into
@@ -507,17 +615,35 @@ def weave_multi(
     # ---- Multi-repo path ----
     today = date.today().isoformat()
     effective_until = until if until is not None else today
+    total = len(repos)
 
     print(f"[repo-weaver] Corpus:     {corpus}")
-    print(f"[repo-weaver] Repos:      {len(repos)} repo(s)")
+    print(f"[repo-weaver] Repos:      {total} repo(s)")
     print(f"[repo-weaver] Window end: {effective_until}")
     if dry_run:
-        print("[repo-weaver] Mode:       dry-run (skipping ingest)\n")
+        print("[repo-weaver] Mode:       dry-run (skipping ingest)")
+    print(
+        f"\n[repo-weaver] Processing {total} repo(s). "
+        "Ingest is sequential and can take several minutes per source.\n"
+    )
 
+    # ---- Phase 1: validate all repos before doing any work ----
+    for repo in repos:
+        if not gitio.is_git_repo(repo):
+            print(
+                f"\nERROR: repo is not a valid git repository or is unreachable: {repo!r}\n"
+                "Fix the repo path or remove it from the corpus config and re-run.",
+                file=sys.stderr,
+            )
+            return 1
+
+    # ---- Phase 2: materialise each repo ----
     all_docs: list[tuple[str, str]] = []
 
     for idx, repo in enumerate(repos, 1):
         repo_qualifier = Path(repo).name  # e.g. "amplifier-app-team-pulse"
+
+        print(f"[repo {idx}/{total}] {repo_qualifier} \u2014 materializing\u2026")
 
         # Per-repo since resolution.
         if since is not None:
@@ -530,8 +656,7 @@ def weave_multi(
             else:
                 effective_since = "2000-01-01"
 
-        print(f"\n[repo-weaver] Repo {idx}/{len(repos)}: {repo}")
-        print(f"[repo-weaver] Window:   {effective_since} \u2192 {effective_until}")
+        print(f"[repo-weaver]   Window: {effective_since} \u2192 {effective_until}")
 
         docs = mat.materialize(
             repo=repo,
@@ -543,9 +668,14 @@ def weave_multi(
         )
 
         if not docs:
-            print(f"[repo-weaver] No documents generated for {repo_qualifier}.")
+            print(
+                f"[repo {idx}/{total}] {repo_qualifier} \u2014 no documents in window."
+            )
         else:
-            print(f"[repo-weaver] {len(docs)} document(s) from {repo_qualifier}.")
+            print(
+                f"[repo {idx}/{total}] {repo_qualifier} \u2014 "
+                f"{len(docs)} doc(s) queued for ingest."
+            )
             all_docs.extend(docs)
 
     if not all_docs:
@@ -573,6 +703,10 @@ def weave_multi(
         return 0
 
     # ---- Ingest via wiki-weaver (with auto-retry) ----
+    print(
+        f"\n[repo-weaver] Ingesting {len(all_docs)} source(s). "
+        "Ingest is sequential — this can take several minutes per source.\n"
+    )
     return _run_ingest_with_retry(
         corpus=corpus,
         max_cycles=max_cycles,

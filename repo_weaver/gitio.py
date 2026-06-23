@@ -55,6 +55,17 @@ def parse_owner_repo(url: str) -> Optional[tuple[str, str]]:
     return None
 
 
+def is_git_repo(repo: str) -> bool:
+    """Return True if *repo* is a valid, reachable git repository.
+
+    Uses ``git rev-parse --is-inside-work-tree`` which exits non-zero for any
+    path that is not inside a git working tree (including non-existent paths,
+    bare non-git directories, and permission-denied paths).
+    """
+    r = _run(["git", "-C", repo, "rev-parse", "--is-inside-work-tree"])
+    return r.returncode == 0
+
+
 def get_first_commit_date(repo: str) -> Optional[str]:
     """Return YYYY-MM-DD of the earliest commit on HEAD, or None."""
     r = _run(
@@ -77,7 +88,17 @@ def get_first_commit_date(repo: str) -> Optional[str]:
 def get_window_rev(repo: str, until: str) -> Optional[str]:
     """Return the SHA of the most recent commit at or before end-of-day on *until*.
 
-    Falls back to HEAD if rev-list returns nothing (e.g. until is in the future).
+    Returns ``None`` if no such commit exists — i.e. *until* predates the
+    repo's first commit or the repo is invalid/empty.  Callers **must not**
+    fall back to HEAD in this case: HEAD may post-date *until*, causing module
+    snapshots to reflect a later historical state than intended.
+
+    The previous HEAD-fallback behaviour has been removed deliberately.  When
+    *until* is genuinely in the future relative to all commits, ``git rev-list
+    --before=<future>`` already returns the most recent commit (which is HEAD),
+    so no fallback is ever needed for that case.  The only scenario where
+    ``rev-list`` returns nothing is when *until* predates every commit — the
+    correct answer is then ``None``.
     """
     r = _run(
         [
@@ -92,11 +113,8 @@ def get_window_rev(repo: str, until: str) -> Optional[str]:
     )
     if r.returncode == 0 and r.stdout.strip():
         return r.stdout.strip()
-
-    # Fallback: use HEAD
-    r2 = _run(["git", "-C", repo, "rev-parse", "HEAD"])
-    if r2.returncode == 0 and r2.stdout.strip():
-        return r2.stdout.strip()
+    # No commits exist at or before `until`.  Return None so callers skip
+    # module snapshots rather than snapshotting an anachronistic HEAD state.
     return None
 
 
@@ -235,14 +253,22 @@ def gh_merged_prs(
     since: str,
     until: str,
     max_fetch: int = 120,
-) -> list[dict[str, object]]:
+) -> tuple[list[dict[str, object]], Optional[str]]:
     """Fetch merged PRs from GitHub whose mergedAt date falls in (since, until].
 
     *owner_repo* is the ``owner/repo`` string.  Fetches up to *max_fetch* PRs
     (capped at 200) from the API, then filters to the date window.  Returns
     **all** matching PRs without further trimming — callers classify and apply
     their own per-tier caps (e.g. cap substantive, collapse routine).
-    Returns an empty list on any gh error.
+
+    Returns a ``(prs, error)`` tuple:
+
+    * ``(prs, None)``   — gh ran successfully; *prs* may be an empty list when
+                          the window genuinely contains no merged PRs.
+    * ``([], error)``   — gh exited non-zero or produced unusable output; the
+                          *error* string carries a human-readable reason.
+                          Callers **must** surface this loudly rather than
+                          silently treating it as "zero PRs".
     """
     fetch_limit = min(max(max_fetch, 60), 200)
     cmd = [
@@ -259,13 +285,24 @@ def gh_merged_prs(
         str(fetch_limit),
     ]
     r = _run(cmd)
-    if r.returncode != 0 or not r.stdout.strip():
-        return []
+    if r.returncode != 0:
+        # gh FAILED — extract the first line of stderr as the reason
+        raw_err = (r.stderr or r.stdout or "").strip()
+        first_line = (
+            raw_err.splitlines()[0][:200]
+            if raw_err
+            else "gh exited non-zero with no message"
+        )
+        return [], f"gh error: {first_line}"
+
+    if not r.stdout.strip():
+        # gh succeeded but returned nothing — genuinely zero PRs
+        return [], None
 
     try:
         prs: list[dict[str, object]] = json.loads(r.stdout)
-    except json.JSONDecodeError:
-        return []
+    except json.JSONDecodeError as exc:
+        return [], f"gh error: could not parse JSON response ({exc})"
 
     # Filter: mergedAt date in (since, until]  — string compare works for ISO dates
     result: list[dict[str, object]] = []
@@ -277,4 +314,4 @@ def gh_merged_prs(
         if since < merged_date <= until:
             result.append(pr)
 
-    return result
+    return result, None

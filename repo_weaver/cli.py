@@ -27,29 +27,10 @@ from . import gitio
 from . import weave as weave_mod
 from .weave import _DEFAULT_MAX_CYCLES, _DEFAULT_MAX_RETRIES
 
-# Policy schema shipped with repo-weaver (relative to this file).
-# Works for both editable installs (project layout) and wheel installs when
-# policy/ is at the project root adjacent to repo_weaver/.
-_HERE = Path(__file__).parent
-_POLICY_DIR: Optional[Path] = None
-
-
-def _policy_dir() -> Optional[Path]:
-    """Locate the shipped policy/ directory, lazily resolved once."""
-    global _POLICY_DIR
-    if _POLICY_DIR is not None:
-        return _POLICY_DIR
-
-    candidates = [
-        _HERE.parent / "policy",  # editable install: policy/ at project root
-        _HERE / "policy",  # wheel install: policy/ inside the package
-    ]
-    for c in candidates:
-        if c.is_dir():
-            _POLICY_DIR = c
-            return _POLICY_DIR
-    return None
-
+# Policy schema shipped with repo-weaver.  Stored inside the package at
+# repo_weaver/policy/schema.md so it is included in both editable installs
+# and wheel installs (uv tool install) without any extra configuration.
+_POLICY_SCHEMA = Path(__file__).parent / "policy" / "schema.md"
 
 # Filename stored inside each corpus to record the repo path and origin URL.
 _CORPUS_CONFIG = ".repo-weaver.json"
@@ -119,7 +100,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:  # noqa: ARG001
     ok, detail = _check_tool("git", ["git", "--version"])
     rows.append(("git", ok, detail))
 
-    # gh + auth
+    # gh binary + auth check
     if shutil.which("gh") is None:
         rows.append(("gh", False, "not found on PATH"))
     else:
@@ -131,20 +112,34 @@ def cmd_doctor(args: argparse.Namespace) -> int:  # noqa: ARG001
         else:
             rows.append(("gh", True, "authenticated"))
 
-    # ANTHROPIC_API_KEY
-    key = os.environ.get("ANTHROPIC_API_KEY", "")
-    if key:
-        rows.append(("ANTHROPIC_API_KEY", True, "set"))
+    # GOOGLE_API_KEY — primary key used by wiki-weaver ingest/ask in this environment.
+    # ANTHROPIC_API_KEY is accepted as an alternative by some wiki-weaver backends.
+    google_key = os.environ.get("GOOGLE_API_KEY", "")
+    anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    if google_key:
+        rows.append(
+            ("GOOGLE_API_KEY", True, "set (primary — used by wiki-weaver ingest)")
+        )
+    elif anthropic_key:
+        rows.append(
+            (
+                "GOOGLE_API_KEY",
+                False,
+                "not set; ANTHROPIC_API_KEY is set (alternative — check wiki-weaver backend)",
+            )
+        )
     else:
         rows.append(
-            ("ANTHROPIC_API_KEY", False, "not set (required for wiki-weaver ingest)")
+            (
+                "GOOGLE_API_KEY",
+                False,
+                "not set — required for wiki-weaver ingest/ask (set GOOGLE_API_KEY or ANTHROPIC_API_KEY)",
+            )
         )
 
-    # policy/schema.md
-    pd = _policy_dir()
-    schema = pd / "schema.md" if pd else None
-    if schema and schema.exists():
-        rows.append(("policy/schema.md", True, str(schema)))
+    # policy/schema.md — packaged inside repo_weaver/policy/
+    if _POLICY_SCHEMA.exists():
+        rows.append(("policy/schema.md", True, str(_POLICY_SCHEMA)))
     else:
         rows.append(("policy/schema.md", False, "not found (reinstall repo-weaver)"))
 
@@ -166,8 +161,9 @@ def cmd_doctor(args: argparse.Namespace) -> int:  # noqa: ARG001
         return 0
 
     print("Some checks failed.  Install hints:")
-    print("  wiki-weaver : pip install wiki-weaver  OR  uv tool install wiki-weaver")
-    print("  gh          : https://cli.github.com/")
+    print("  wiki-weaver    : pip install wiki-weaver  OR  uv tool install wiki-weaver")
+    print("  gh             : https://cli.github.com/")
+    print("  GOOGLE_API_KEY : export GOOGLE_API_KEY=<your-key>")
     return 1
 
 
@@ -192,25 +188,27 @@ def cmd_init(args: argparse.Namespace) -> int:
         )
         return r.returncode
 
-    # 2. Install code-fit schema
-    pd = _policy_dir()
-    if pd:
-        schema_src = pd / "schema.md"
-        policy_dst = Path(corpus) / "policy"
-        policy_dst.mkdir(parents=True, exist_ok=True)
-        schema_dst = policy_dst / "schema.md"
-        shutil.copy2(schema_src, schema_dst)
-        print(f"[repo-weaver] Installed schema: {schema_dst}")
-    else:
+    # 2. Install code-fit schema — REQUIRED: a corpus without a schema is broken.
+    if not _POLICY_SCHEMA.exists():
         print(
-            "WARNING: policy/schema.md not found \u2014 skipping schema install.",
+            "ERROR: policy/schema.md not found in the repo-weaver package.\n"
+            "This is required for wiki-weaver to understand the corpus structure.\n"
+            "Reinstall repo-weaver:  pip install --force-reinstall repo-weaver\n"
+            "                   OR:  uv tool install --reinstall repo-weaver",
             file=sys.stderr,
         )
+        return 1
+
+    policy_dst = Path(corpus) / "policy"
+    policy_dst.mkdir(parents=True, exist_ok=True)
+    schema_dst = policy_dst / "schema.md"
+    shutil.copy2(_POLICY_SCHEMA, schema_dst)
+    print(f"[repo-weaver] Installed schema: {schema_dst}")
 
     # 3. Save corpus config (list of repo absolute paths)
     cfg: dict[str, object] = {}
     if repo_args:
-        repo_paths = [str(Path(r).resolve()) for r in repo_args]
+        repo_paths = [str(Path(rp).resolve()) for rp in repo_args]
         cfg["repos"] = repo_paths
         for rp in repo_paths:
             origin = gitio.get_origin_url(rp)
@@ -339,16 +337,20 @@ def cmd_replay(args: argparse.Namespace) -> int:
     for i in range(len(raw_cutoffs) - 1):
         windows.append((raw_cutoffs[i], raw_cutoffs[i + 1]))
 
-    banner_width = 60
     max_prs: int = getattr(args, "max_prs", 15)
     max_modules: int = getattr(args, "max_modules", 5)
     max_cycles: int = getattr(args, "max_cycles", _DEFAULT_MAX_CYCLES)
     max_retries: int = getattr(args, "max_retries", _DEFAULT_MAX_RETRIES)
+    total_windows = len(windows)
+
+    print(
+        f"[repo-weaver] Replay: {total_windows} window(s) across "
+        f"{len(repos)} repo(s). "
+        "Ingest is sequential and can take several minutes per window.\n"
+    )
 
     for idx, (since, until) in enumerate(windows, 1):
-        print(f"\n{'=' * banner_width}")
-        print(f"  REPLAY WINDOW {idx}/{len(windows)}: {since} \u2192 {until}")
-        print(f"{'=' * banner_width}\n")
+        print(f"[window {idx}/{total_windows}] {since} \u2192 {until}")
         rc = weave_mod.weave_multi(
             corpus=corpus,
             repos=repos,
