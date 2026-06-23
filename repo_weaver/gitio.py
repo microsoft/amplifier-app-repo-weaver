@@ -234,15 +234,17 @@ def gh_merged_prs(
     owner_repo: str,
     since: str,
     until: str,
-    limit: int,
+    max_fetch: int = 120,
 ) -> list[dict[str, object]]:
     """Fetch merged PRs from GitHub whose mergedAt date falls in (since, until].
 
-    *owner_repo* is the ``owner/repo`` string.  Fetches up to ``limit * 4``
-    PRs (capped at 200) to allow client-side date filtering, then trims to
-    *limit*.  Returns an empty list on any gh error.
+    *owner_repo* is the ``owner/repo`` string.  Fetches up to *max_fetch* PRs
+    (capped at 200) from the API, then filters to the date window.  Returns
+    **all** matching PRs without further trimming — callers classify and apply
+    their own per-tier caps (e.g. cap substantive, collapse routine).
+    Returns an empty list on any gh error.
     """
-    fetch_limit = min(max(limit * 4, 60), 200)
+    fetch_limit = min(max(max_fetch, 60), 200)
     cmd = [
         "gh",
         "pr",
@@ -275,4 +277,4 @@ def gh_merged_prs(
         if since < merged_date <= until:
             result.append(pr)
 
-    return result[:limit]
+    return result
