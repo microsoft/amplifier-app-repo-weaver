@@ -6,7 +6,8 @@ CLI:
     python -m eval.run_questions \\
         --corpus  <corpus-dir>          \\
         --questions eval/questions.yaml \\
-        --out     <output-dir>
+        --out     <output-dir>          \\
+        --timeout 300
 
 For each question the script:
   1. Calls ``repo-weaver ask "<question>" --corpus <corpus> --json`` via subprocess.
@@ -14,8 +15,16 @@ For each question the script:
   3. Writes ``<out>/answers/<id>.json`` with the full record.
   4. Writes ``<out>/answers.index.json`` once all questions are done.
 
-Exit 0 if every question was attempted (grading is separate).
-Exit 1 if the subprocess could not be launched at all.
+Exit codes:
+  0  Every question answered successfully (status="ok" for all).
+  1  Any question timed out, errored, produced a nonzero exit, or returned an
+     empty/unparseable answer — the failing question IDs are printed to stderr.
+     Also exits 1 if the subprocess could not be launched at all.
+
+Per-question records always include a ``status`` field (``"ok"``, ``"timeout"``,
+or ``"errored"``) so downstream judges/tracers can filter without inspecting the
+``answer`` field.  On any non-ok status the ``answer`` field is set to the
+``_ANSWER_SENTINEL`` string — a value that cannot be mistaken for a real answer.
 """
 
 from __future__ import annotations
@@ -25,6 +34,18 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+# Written to the ``answer`` field whenever an ask fails.  Deliberately ugly so
+# downstream graders cannot mistake it for a real (possibly empty) answer.
+_ANSWER_SENTINEL = "[ANSWER UNAVAILABLE — see status/error fields]"
+
+# Default per-question timeout.  Multi-PR synthesis questions legitimately need
+# several minutes; 120 s (the old default) was too tight.
+_DEFAULT_TIMEOUT = 300  # seconds
 
 
 # ---------------------------------------------------------------------------
@@ -175,10 +196,13 @@ def run_questions(
     corpus: str,
     questions_file: str,
     out_dir: str,
+    timeout: int = _DEFAULT_TIMEOUT,
 ) -> int:
     """Run all questions and write outputs to out_dir.
 
-    Returns 0 if all questions were attempted, 1 on a hard launch error.
+    Returns 0 if every question answered successfully (status="ok" for all).
+    Returns 1 if any question timed out, errored, or returned an empty answer,
+    or if the subprocess could not be launched.
     """
     q_path = Path(questions_file)
     out = Path(out_dir).resolve()
@@ -193,10 +217,11 @@ def run_questions(
 
     print(f"[eval] {len(questions)} question(s) loaded from {q_path}")
     print(f"[eval] corpus  : {corpus}")
-    print(f"[eval] out dir : {out}\n")
+    print(f"[eval] out dir : {out}")
+    print(f"[eval] timeout : {timeout}s per question\n")
 
     index: list[dict] = []
-    any_launch_error = False
+    errored_ids: list[str] = []
 
     for i, q in enumerate(questions, 1):
         qid = q.get("id", f"question-{i}")
@@ -216,58 +241,79 @@ def run_questions(
             "--json",
         ]
 
+        # These will be overwritten in each branch below.
+        status: str
+        answer: object  # str on ok, _ANSWER_SENTINEL on error
+        pages_used: list
+        refused: bool | None
+        error: str | None
+
         try:
             proc = subprocess.run(
                 cmd,
                 capture_output=True,
                 text=True,
-                timeout=120,
+                timeout=timeout,
             )
         except FileNotFoundError:
-            print("ERROR: repo-weaver not found on PATH", file=sys.stderr)
-            any_launch_error = True
-            print("LAUNCH_ERROR")
-            continue
-        except subprocess.TimeoutExpired:
-            print("TIMEOUT")
-            record: dict = {
-                "id": qid,
-                "question": question_text,
-                "kind": kind,
-                "must_cite": must_cite,
-                "expected": expected,
-                "answer": None,
-                "pages_used": [],
-                "refused": None,
-                "error": "subprocess timed out after 120 s",
-            }
-            _write_answer(answers_dir, qid, record)
-            index.append({"id": qid, "file": f"answers/{qid}.json"})
-            continue
-
-        # Combine stdout and stderr for extraction (log lines can go to either).
-        combined = proc.stdout + proc.stderr
-
-        try:
-            payload = _extract_json(combined)
-            answer = payload.get("answer")
-            pages_used = payload.get("pages_used", [])
-            refused = payload.get("refused", False)
-            error = None
-            print(f"ok  (exit={proc.returncode}, refused={refused})")
-        except ValueError as exc:
-            answer = None
+            msg = "repo-weaver not found on PATH"
+            print(f"LAUNCH_ERROR: {msg}", file=sys.stderr)
+            status = "errored"
+            answer = _ANSWER_SENTINEL
             pages_used = []
             refused = None
-            error = str(exc)
-            print(f"PARSE_ERROR  exit={proc.returncode}")
+            error = msg
+            errored_ids.append(qid)
+        except subprocess.TimeoutExpired:
+            msg = f"subprocess timed out after {timeout} s"
+            print(f"TIMEOUT  ({msg})")
+            status = "timeout"
+            answer = _ANSWER_SENTINEL
+            pages_used = []
+            refused = None
+            error = msg
+            errored_ids.append(qid)
+        else:
+            # Combine stdout and stderr for extraction (log lines can go to either).
+            combined = proc.stdout + proc.stderr
 
-        record = {
+            try:
+                payload = _extract_json(combined)
+
+                # Nonzero exit is always an error, even if JSON was parseable.
+                if proc.returncode != 0:
+                    raise ValueError(f"ask exited with nonzero code {proc.returncode}")
+
+                raw_answer = payload.get("answer")
+                if not raw_answer:
+                    raise ValueError(
+                        f"ask returned an empty/null answer field "
+                        f"(exit={proc.returncode})"
+                    )
+
+                status = "ok"
+                answer = raw_answer
+                pages_used = payload.get("pages_used", [])
+                refused = payload.get("refused", False)
+                error = None
+                print(f"ok  (exit={proc.returncode}, refused={refused})")
+
+            except ValueError as exc:
+                error = str(exc)
+                status = "errored"
+                answer = _ANSWER_SENTINEL
+                pages_used = []
+                refused = None
+                errored_ids.append(qid)
+                print(f"ERROR  exit={proc.returncode}  {error}")
+
+        record: dict = {
             "id": qid,
             "question": question_text,
             "kind": kind,
             "must_cite": must_cite,
             "expected": expected,
+            "status": status,
             "answer": answer,
             "pages_used": pages_used,
             "refused": refused,
@@ -276,7 +322,7 @@ def run_questions(
             record["error"] = error
 
         _write_answer(answers_dir, qid, record)
-        index.append({"id": qid, "file": f"answers/{qid}.json"})
+        index.append({"id": qid, "file": f"answers/{qid}.json", "status": status})
 
     # Write index
     index_path = out / "answers.index.json"
@@ -284,7 +330,18 @@ def run_questions(
     print(f"\n[eval] index written: {index_path}")
     print(f"[eval] answers in   : {answers_dir}/")
 
-    return 1 if any_launch_error else 0
+    if errored_ids:
+        print(
+            f"\n[eval] FAILED — {len(errored_ids)} of {len(questions)} question(s) "
+            f"timed out or errored:",
+            file=sys.stderr,
+        )
+        for eid in errored_ids:
+            print(f"  - {eid}", file=sys.stderr)
+        return 1
+
+    print(f"\n[eval] All {len(questions)} question(s) answered successfully.")
+    return 0
 
 
 def _write_answer(answers_dir: Path, qid: str, record: dict) -> None:
@@ -323,12 +380,20 @@ def main(argv: list[str] | None = None) -> int:
         metavar="DIR",
         help="Output directory for answer files (default: ./eval-out).",
     )
+    parser.add_argument(
+        "--timeout",
+        type=int,
+        default=_DEFAULT_TIMEOUT,
+        metavar="SECONDS",
+        help=f"Per-question ask timeout in seconds (default: {_DEFAULT_TIMEOUT}).",
+    )
     args = parser.parse_args(argv)
 
     return run_questions(
         corpus=args.corpus,
         questions_file=args.questions,
         out_dir=args.out,
+        timeout=args.timeout,
     )
 
 
