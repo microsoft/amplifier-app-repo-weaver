@@ -190,7 +190,7 @@ def _append_pr_detail(parts: list[str], pr: dict[str, object]) -> None:
     top_paths = [str(f.get("path", "")) for f in files_list[:5] if isinstance(f, dict)]
 
     parts.append(f"### PR #{n}: {title}\n\n")
-    parts.append(f"- **Author:** {author_name}\n")
+    parts.append(f"- **Author (PR opener):** {author_name}\n")
     parts.append(f"- **Merged:** {merged_at}\n")
     parts.append(f"- **Files changed:** {file_count}\n")
     if top_paths:
@@ -404,15 +404,29 @@ def _build_change_digest(
             parts.append(f"- `{d}`: {count} commit(s)\n")
         parts.append("\n")
 
-    # ---- Frontmatter ----
+    # ---- Window contributors (provenance, NOT per-PR authorship) ----
+    # Appended to the body BEFORE the frontmatter is composed so the section
+    # is clearly visible in the document — and explicitly NOT the PR-opener field.
     authors = gitio.get_shortlog_authors(repo, since, until, top_n=3)
-    author_str = ", ".join(authors)
+    if authors:
+        parts.append("## Window Contributors\n\n")
+        parts.append(
+            "_Git-log contributors in this window (window-level provenance — "
+            "NOT the per-PR opener; see each PR's `Author (PR opener)` field "
+            "for authoritative per-PR attribution.)_\n\n"
+        )
+        parts.append(", ".join(authors) + "\n\n")
+
+    # ---- Frontmatter ----
+    # Use only the single top contributor so the `author:` metadata field cannot
+    # be mistaken for a list of PR authors by downstream synthesizers.
+    fm_author = authors[0] if authors else ""
     source_url = ""
     if owner_repo:
         owner, name = owner_repo
         source_url = f"https://github.com/{owner}/{name}/pulls?q=is:pr+is:merged"
 
-    fm = _frontmatter(author_str, source_url, until)
+    fm = _frontmatter(fm_author, source_url, until)
     return fm + "\n\n" + "".join(parts)
 
 
@@ -600,14 +614,28 @@ def _build_module_doc(
             parts.append(f"- _(\u2026 and {len(touching) - 12} more)_\n")
     parts.append("\n")
 
-    # ---- Frontmatter ----
+    # ---- Top contributors this window (provenance, NOT authorship of any PR) ----
+    # Listed in the body with an explicit label so it is never confused with
+    # a per-PR `Author (PR opener)` field.
     authors = gitio.get_shortlog_authors(repo, since, until, path=module_path, top_n=3)
-    author_str = ", ".join(authors)
+    if authors:
+        parts.append("## Top Contributors This Window\n\n")
+        parts.append(
+            f"_Committers to `{module_path}` in this window "
+            f"(window-level provenance — NOT the PR opener; "
+            f"see the change-digest for per-PR attribution):_\n\n"
+        )
+        parts.append(", ".join(authors) + "\n\n")
+
+    # ---- Frontmatter ----
+    # Single top contributor keeps the `author:` metadata unambiguous;
+    # the full list is in the body section above.
+    fm_author = authors[0] if authors else ""
     source_url = ""
     if owner_repo and until_rev:
         owner, name = owner_repo
         rev_short = until_rev[:8]
         source_url = f"https://github.com/{owner}/{name}/tree/{rev_short}/{module_path}"
 
-    fm = _frontmatter(author_str, source_url, until)
+    fm = _frontmatter(fm_author, source_url, until)
     return fm + "\n\n" + "".join(parts)

@@ -47,3 +47,8 @@ last_updated: YYYY-MM-DD
 2. Prefer exact quotes or file paths over paraphrase when available.
 3. When sources conflict, keep both claims with their respective citations.
 4. A module page with only source-1 facts should not assert things from source-2.
+5. Attribute each PR or change to the single author explicitly stated in that PR's
+   `Author (PR opener)` field — the GitHub login of the person who opened the PR.
+   Never infer per-PR authorship from the digest's window-level contributor list,
+   co-author lines, reviewer handles, or bot names; those appear in a separate
+   "Window Contributors" section and are window-level provenance, not PR authorship.
