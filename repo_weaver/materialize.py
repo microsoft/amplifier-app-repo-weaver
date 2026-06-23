@@ -261,7 +261,7 @@ def _build_module_snapshots(
             owner_repo,
         )
         if content:
-            filename = f"module-{_slug(module_path)}.md"
+            filename = f"module-{_slug(module_path)}-{until}.md"
             results.append((filename, content))
     return results
 
