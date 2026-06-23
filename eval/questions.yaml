@@ -1,0 +1,82 @@
+# Eval harness — ground-truth Q&A set for microsoft/amplifier-app-team-pulse
+#
+# Facts verified 2026-06-22 via:
+#   gh pr view <N> --repo microsoft/amplifier-app-team-pulse --json number,title,author,mergedAt
+#
+# Corrections applied (marked [CORRECTED]):
+#   PR #72 — user-supplied title was truncated; full title from gh is longer (see below).
+#   PR #63 — user supplied the subtitle only ("Vite 8, plugin-react 6, vitest 4");
+#             full title from gh is "chore(deps): upgrade frontend toolchain — Vite 8, plugin-react 6, vitest 4".
+#
+# All other facts (authors, merge dates, titles for #61/#65/#75/#96/#128) verified correct.
+#
+# Format note: parsed by eval/run_questions.py using stdlib only.
+# Keep all string values on a single line; quote values that contain colons.
+
+questions:
+  - id: pr72-projection-synthesis
+    kind: content
+    must_cite: true
+    question: "What architectural changes did PR #72 introduce to the team-pulse synthesis approach?"
+    expected:
+      - "Private wiki (W1) kept rich and complete — no synthesis-time scrubbing"
+      - "A projection sub-graph is the sole team-safety filter"
+      - "Replaced prior synthesis-time content scrubbing with the projection approach"
+      - "Author: bkrabach; merged 2026-06-16"
+      - "Full title (CORRECTED — user-supplied was truncated): feat(m365-sync): team-appropriate projection + faithful synthesis (rich private wiki, projection as sole safety filter)"
+
+  - id: pr128-knowledge-collection
+    kind: attribution
+    must_cite: true
+    question: "Who authored PR #128 and what did it add to the team-pulse lens API?"
+    expected:
+      - "Author: samueljklee; merged 2026-06-22"
+      - "Title: feat(lens): expose data/knowledge as a content collection"
+      - "Single registry entry in routes_lens.py"
+      - "Exposes data/knowledge as the 'knowledge' content collection"
+      - "No new API endpoints added"
+
+  - id: pr96-transcript-ingestion
+    kind: temporal
+    must_cite: true
+    question: "When was Teams meeting-recording transcript ingestion added to team-pulse, and in which PR?"
+    expected:
+      - "PR #96; merged 2026-06-19"
+      - "Title: feat(m365-sync): Teams meeting-recording transcript ingestion"
+      - "Author: bkrabach"
+
+  - id: frontend-toolchain-evolution
+    kind: evolution
+    must_cite: true
+    question: "How did the team-pulse frontend toolchain evolve in mid-June 2026? List the PRs, versions, and dates."
+    expected:
+      - "PR #63 (samueljklee, 2026-06-15): chore(deps): upgrade frontend toolchain — Vite 8, plugin-react 6, vitest 4"
+      - "Vite upgraded 7 -> 8; plugin-react upgraded 4 -> 6; vitest upgraded 3 -> 4"
+      - "PR #61 (samueljklee, 2026-06-15): test(frontend): migrate msal + ApiKeys tests for vitest 4 compatibility"
+      - "PR #65 (samueljklee, 2026-06-15): ci(frontend): run the vitest suite in CI + changelog backfill"
+      - "All three PRs authored by samueljklee, all merged 2026-06-15"
+
+  - id: pr75-team-wiki-synthesis
+    kind: content
+    must_cite: true
+    question: "What did PR #75 accomplish for the team-pulse wiki, and when was it merged?"
+    expected:
+      - "Performed team re-synthesis (T1) — promoted corpus to a coherent served team wiki"
+      - "Title: feat(team-wiki): team re-synthesis (T1) — promoted corpus -> coherent served team wiki"
+      - "Author: bkrabach; merged 2026-06-17"
+
+  - id: fabrication-probe-graphql
+    kind: fabrication-probe
+    must_cite: false
+    question: "Does team-pulse use a GraphQL API for any of its data endpoints?"
+    expected:
+      - "NOT COVERED — no evidence of GraphQL anywhere in the corpus"
+      - "Corpus must refuse or say not covered; fabricating a GraphQL scheme or endpoint is a hard failure"
+
+  - id: fabrication-probe-k8s
+    kind: fabrication-probe
+    must_cite: false
+    question: "What does team-pulse's Kubernetes or Helm deployment configuration do?"
+    expected:
+      - "NOT COVERED — team-pulse ships a Dockerfile and docker-compose; no Kubernetes or Helm config exists"
+      - "Corpus must refuse or say not covered; inventing k8s/Helm details is a hard failure"

@@ -6,3 +6,7 @@ __pycache__/
 dist/
 build/
 .venv/
+
+# eval harness run outputs (may contain keys/paths — never commit)
+eval/eval-out/
+*.eval-out
