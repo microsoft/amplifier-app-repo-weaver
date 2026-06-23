@@ -3,8 +3,17 @@
 Produces a small, high-signal set per window:
 
 1. ONE ``<until>-changes.md`` — merged PRs + commit-volume digest.
-2. UP TO ``max_modules`` ``module-<slug>.md`` files — snapshots of the
+   When ``repo_qualifier`` is set (multi-repo mode): ``<repo>-<until>-changes.md``.
+2. UP TO ``max_modules`` ``module-<slug>-<until>.md`` files — snapshots of the
    top-level code directories most changed in the window.
+   When ``repo_qualifier`` is set: ``module-<repo>-<slug>-<until>.md``.
+
+**Single-repo** (``repo_qualifier=None``): filenames are unqualified — identical
+to the historic behaviour, so existing ingested corpora are unaffected.
+
+**Multi-repo** (``repo_qualifier`` provided): every filename and doc body carry
+the repo identifier so wiki-weaver keeps pages from different repos distinct and
+citations always point back to the right source.
 
 Never fabricates provenance.  All data comes from git plumbing or the gh CLI.
 """
@@ -202,16 +211,25 @@ def materialize(
     until: str,
     max_prs: int = 15,
     max_modules: int = 5,
+    repo_qualifier: Optional[str] = None,
 ) -> list[tuple[str, str]]:
     """Materialize source documents for the window (since, until].
 
     Args:
-        repo:        Absolute path to the local git repository.
-        since:       Window start date YYYY-MM-DD (exclusive — commits *after*
-                     this date are included).
-        until:       Window end date YYYY-MM-DD (inclusive, up to 23:59:59).
-        max_prs:     Maximum merged PRs to include in the change digest.
-        max_modules: Maximum module snapshot documents to emit.
+        repo:           Absolute path to the local git repository.
+        since:          Window start date YYYY-MM-DD (exclusive — commits *after*
+                        this date are included).
+        until:          Window end date YYYY-MM-DD (inclusive, up to 23:59:59).
+        max_prs:        Maximum merged PRs to include in the change digest.
+        max_modules:    Maximum module snapshot documents to emit.
+        repo_qualifier: When non-None (multi-repo mode) this short label is
+                        injected into every filename and document body so that
+                        sources from different repos never collide and citations
+                        always trace back to the correct repo.  Typically the
+                        repository's directory base-name (e.g.
+                        ``"amplifier-app-team-pulse"``).
+                        When None (single-repo mode) filenames are unqualified
+                        — identical to historic behaviour.
 
     Returns:
         List of ``(filename, content)`` pairs ready to write into ``_inbox/``.
@@ -228,14 +246,21 @@ def materialize(
     docs: list[tuple[str, str]] = []
 
     # 1. Change digest
+    # Filename: "<repo>-<until>-changes.md" (multi) or "<until>-changes.md" (single)
     digest_content = _build_change_digest(
-        repo, since, until, until_rev, commits, owner_repo, max_prs
+        repo, since, until, until_rev, commits, owner_repo, max_prs, repo_qualifier
     )
-    docs.append((f"{until}-changes.md", digest_content))
+    digest_filename = (
+        f"{repo_qualifier}-{until}-changes.md"
+        if repo_qualifier
+        else f"{until}-changes.md"
+    )
+    docs.append((digest_filename, digest_content))
 
     # 2. Module snapshots
+    # Filenames: "module-<repo>-<slug>-<until>.md" (multi) or "module-<slug>-<until>.md" (single)
     module_docs = _build_module_snapshots(
-        repo, since, until, until_rev, commits, owner_repo, max_modules
+        repo, since, until, until_rev, commits, owner_repo, max_modules, repo_qualifier
     )
     docs.extend(module_docs)
 
@@ -273,8 +298,15 @@ def _build_change_digest(
     commits: list[dict[str, object]],
     owner_repo: Optional[tuple[str, str]],
     max_prs: int,
+    repo_qualifier: Optional[str] = None,
 ) -> str:
-    """Build the ``<until>-changes.md`` source document.
+    """Build the change-digest source document.
+
+    In single-repo mode (``repo_qualifier=None``) the document title is
+    ``# Changes: <since> -> <until>``.  In multi-repo mode a
+    ``**Repository:** <qualifier>`` line is added immediately after the
+    title so the synthesizer can attribute facts to the right repo and keep
+    pages for different repos distinct.
 
     Merged PRs are split into two tiers so routine noise never buries real work:
 
@@ -292,6 +324,9 @@ def _build_change_digest(
     """
     parts: list[str] = []
     parts.append(f"# Changes: {since} \u2192 {until}\n\n")
+    # In multi-repo mode, label the repo so the synthesizer keeps digests distinct.
+    if repo_qualifier:
+        parts.append(f"**Repository:** `{repo_qualifier}`\n\n")
 
     # Fetch generously so the window is fully covered even when many newer PRs
     # exist beyond it.  Routine PRs are free (collapsed), so we never need to
@@ -423,6 +458,7 @@ def _build_module_snapshots(
     commits: list[dict[str, object]],
     owner_repo: Optional[tuple[str, str]],
     max_modules: int,
+    repo_qualifier: Optional[str] = None,
 ) -> list[tuple[str, str]]:
     ranked = _rank_modules(commits)[:max_modules]
     results: list[tuple[str, str]] = []
@@ -436,9 +472,15 @@ def _build_module_snapshots(
             commit_count,
             commits,
             owner_repo,
+            repo_qualifier,
         )
         if content:
-            filename = f"module-{_slug(module_path)}-{until}.md"
+            # Multi-repo: "module-<repo>-<slug>-<until>.md"  (non-colliding)
+            # Single-repo: "module-<slug>-<until>.md"         (historic, unchanged)
+            if repo_qualifier:
+                filename = f"module-{repo_qualifier}-{_slug(module_path)}-{until}.md"
+            else:
+                filename = f"module-{_slug(module_path)}-{until}.md"
             results.append((filename, content))
     return results
 
@@ -484,10 +526,22 @@ def _build_module_doc(
     commit_count: int,
     all_commits: list[dict[str, object]],
     owner_repo: Optional[tuple[str, str]],
+    repo_qualifier: Optional[str] = None,
 ) -> Optional[str]:
-    """Build a single module snapshot document."""
+    """Build a single module snapshot document.
+
+    In multi-repo mode (``repo_qualifier`` set) the title becomes
+    ``# Module: <path> (<repo>)`` and a **Repository** line is injected
+    so the synthesizer treats modules with the same path but different repos
+    as distinct pages rather than merging them.
+    """
     parts: list[str] = []
-    parts.append(f"# Module: {module_path}\n\n")
+    if repo_qualifier:
+        # Disambiguate: "frontend (amplifier-app-team-pulse)" vs "frontend (amplifier-bundle-wiki-weaver)"
+        parts.append(f"# Module: {module_path} ({repo_qualifier})\n\n")
+        parts.append(f"**Repository:** `{repo_qualifier}`\n\n")
+    else:
+        parts.append(f"# Module: {module_path}\n\n")
 
     # ---- Purpose ----
     purpose: Optional[str] = None

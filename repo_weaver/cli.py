@@ -54,27 +54,37 @@ def _policy_dir() -> Optional[Path]:
 _CORPUS_CONFIG = ".repo-weaver.json"
 
 
-def _load_corpus_config(corpus: str) -> dict[str, str]:
+def _load_corpus_config(corpus: str) -> dict[str, object]:
     cfg_path = Path(corpus) / _CORPUS_CONFIG
     if cfg_path.exists():
         try:
-            return json.loads(cfg_path.read_text(encoding="utf-8"))
+            return json.loads(cfg_path.read_text(encoding="utf-8"))  # type: ignore[return-value]
         except (json.JSONDecodeError, OSError):
             return {}
     return {}
 
 
-def _save_corpus_config(corpus: str, cfg: dict[str, str]) -> None:
+def _save_corpus_config(corpus: str, cfg: dict[str, object]) -> None:
     cfg_path = Path(corpus) / _CORPUS_CONFIG
     cfg_path.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
 
 
-def _resolve_repo(args_repo: Optional[str], corpus: str) -> Optional[str]:
-    """Return the repo path from CLI arg or stored corpus config."""
-    if args_repo:
-        return args_repo
+def _load_corpus_repos(corpus: str) -> list[str]:
+    """Return the list of repo paths from the corpus config.
+
+    Handles both the new format (``"repos": [...]``) and the old single-repo
+    format (``"repo": "..."``), so corpora initialised before multi-repo
+    support was added continue to work without migration.
+    """
     cfg = _load_corpus_config(corpus)
-    return cfg.get("repo")
+    repos_val = cfg.get("repos")
+    if isinstance(repos_val, list):
+        return [str(r) for r in repos_val if r]
+    # Backward-compat: old config stored a single path under "repo"
+    repo_val = cfg.get("repo")
+    if isinstance(repo_val, str) and repo_val:
+        return [repo_val]
+    return []
 
 
 # ---------------------------------------------------------------------------
@@ -168,7 +178,8 @@ def cmd_doctor(args: argparse.Namespace) -> int:  # noqa: ARG001
 def cmd_init(args: argparse.Namespace) -> int:
     """Scaffold a corpus directory and install the code-fit schema."""
     corpus = args.corpus_dir
-    repo: Optional[str] = getattr(args, "repo", None)
+    # args.repo is list[str] | None  (action="append"; None when flag is absent)
+    repo_args: Optional[list[str]] = getattr(args, "repo", None)
 
     # 1. Scaffold via wiki-weaver
     print(f"[repo-weaver] Initialising wiki at {corpus} ...")
@@ -191,18 +202,19 @@ def cmd_init(args: argparse.Namespace) -> int:
         print(f"[repo-weaver] Installed schema: {schema_dst}")
     else:
         print(
-            "WARNING: policy/schema.md not found — skipping schema install.",
+            "WARNING: policy/schema.md not found \u2014 skipping schema install.",
             file=sys.stderr,
         )
 
-    # 3. Save corpus config (repo path + origin URL)
-    cfg: dict[str, str] = {}
-    if repo:
-        repo_abs = str(Path(repo).resolve())
-        cfg["repo"] = repo_abs
-        origin = gitio.get_origin_url(repo_abs)
-        if origin:
-            cfg["origin_url"] = origin
+    # 3. Save corpus config (list of repo absolute paths)
+    cfg: dict[str, object] = {}
+    if repo_args:
+        repo_paths = [str(Path(r).resolve()) for r in repo_args]
+        cfg["repos"] = repo_paths
+        for rp in repo_paths:
+            origin = gitio.get_origin_url(rp)
+            label = f" ({origin})" if origin else ""
+            print(f"[repo-weaver] Registered repo: {rp}{label}")
 
     _save_corpus_config(corpus, cfg)
     print(f"[repo-weaver] Corpus config: {Path(corpus) / _CORPUS_CONFIG}")
@@ -218,17 +230,33 @@ def cmd_init(args: argparse.Namespace) -> int:
 def cmd_weave(args: argparse.Namespace) -> int:
     """Materialise sources and (unless --dry-run) run wiki-weaver ingest."""
     corpus = args.corpus
-    repo = _resolve_repo(getattr(args, "repo", None), corpus)
-    if not repo:
+    repo_override: Optional[str] = getattr(args, "repo", None)
+
+    if repo_override:
+        # Explicit --repo override: single-repo path, unqualified filenames (historic behaviour).
+        return weave_mod.weave(
+            corpus=corpus,
+            repo=repo_override,
+            since=args.since,
+            until=args.until,
+            max_prs=args.max_prs,
+            max_modules=args.max_modules,
+            dry_run=args.dry_run,
+        )
+
+    # No override: weave all repos recorded in the corpus config.
+    repos = _load_corpus_repos(corpus)
+    if not repos:
         print(
-            "ERROR: --repo is required (or record it via `repo-weaver init --repo PATH`).",
+            "ERROR: no repos configured. "
+            "Use `repo-weaver init --repo PATH` to record repo(s), or pass --repo to override.",
             file=sys.stderr,
         )
         return 1
 
-    return weave_mod.weave(
+    return weave_mod.weave_multi(
         corpus=corpus,
-        repo=repo,
+        repos=repos,
         since=args.since,
         until=args.until,
         max_prs=args.max_prs,
@@ -259,13 +287,19 @@ def cmd_ask(args: argparse.Namespace) -> int:
 def cmd_replay(args: argparse.Namespace) -> int:
     """Weave successive non-overlapping windows for an over-time corpus build."""
     corpus = args.corpus
-    repo = _resolve_repo(getattr(args, "repo", None), corpus)
-    if not repo:
-        print(
-            "ERROR: --repo is required (or record it via `repo-weaver init --repo PATH`).",
-            file=sys.stderr,
-        )
-        return 1
+    repo_override: Optional[str] = getattr(args, "repo", None)
+
+    if repo_override:
+        repos = [repo_override]
+    else:
+        repos = _load_corpus_repos(corpus)
+        if not repos:
+            print(
+                "ERROR: no repos configured. "
+                "Use `repo-weaver init --repo PATH` to record repo(s), or pass --repo.",
+                file=sys.stderr,
+            )
+            return 1
 
     raw_cutoffs = [w.strip() for w in args.windows.split(",") if w.strip()]
     if not raw_cutoffs:
@@ -283,10 +317,15 @@ def cmd_replay(args: argparse.Namespace) -> int:
             print(f"ERROR: invalid date in --windows: {d!r}", file=sys.stderr)
             return 1
 
-    # Determine start: one day before the repo's first commit
-    first = gitio.get_first_commit_date(repo)
-    if first:
-        start = (date.fromisoformat(first) - timedelta(days=1)).isoformat()
+    # Determine start: one day before the earliest first commit across all repos.
+    first_dates: list[str] = []
+    for r in repos:
+        first = gitio.get_first_commit_date(r)
+        if first:
+            first_dates.append(first)
+
+    if first_dates:
+        start = (date.fromisoformat(min(first_dates)) - timedelta(days=1)).isoformat()
     else:
         start = "2000-01-01"
 
@@ -303,9 +342,9 @@ def cmd_replay(args: argparse.Namespace) -> int:
         print(f"\n{'=' * banner_width}")
         print(f"  REPLAY WINDOW {idx}/{len(windows)}: {since} \u2192 {until}")
         print(f"{'=' * banner_width}\n")
-        rc = weave_mod.weave(
+        rc = weave_mod.weave_multi(
             corpus=corpus,
-            repo=repo,
+            repos=repos,
             since=since,
             until=until,
             max_prs=max_prs,
@@ -350,7 +389,14 @@ def _build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("init", help="Scaffold a new corpus directory.")
     p.add_argument("corpus_dir", help="Directory to create the corpus in.")
     p.add_argument(
-        "--repo", metavar="PATH", help="Path to the local git repo to track."
+        "--repo",
+        metavar="PATH",
+        action="append",
+        help=(
+            "Path to a local git repo to include in this corpus. "
+            "Repeatable: --repo A --repo B tracks multiple repos. "
+            "Omit to create a repo-less corpus and supply --repo at weave time."
+        ),
     )
     p.set_defaults(func=cmd_init)
 
