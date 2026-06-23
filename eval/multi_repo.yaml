@@ -1,0 +1,104 @@
+# Multi-repo cross-repo eval Q&A set
+# Exercises CROSS-REPO understanding against the 10-repo Amplifier corpus:
+#   amplifier-core, amplifier-foundation, amplifier-app-cli, amplifier-docs,
+#   amplifier-distro, amplifier-bundle-recipes, amplifier-bundle-skills,
+#   amplifier-bundle-evaluation, amplifier-bundle-dot-graph,
+#   amplifier-bundle-context-intelligence
+# Corpus window: 2026-05-25..2026-06-23
+#
+# These questions are designed to test capabilities that single-repo question sets
+# cannot verify: cross-repo relationships, attributions that span repos, ownership
+# of capabilities shared across the system, isolation (facts not bleeding across repos),
+# and fabrication resistance for repo pairs with zero in-window activity.
+#
+# Facts verified 2026-06-23 via:
+#   gh pr view <N> --repo microsoft/<repo> --json number,title,author,mergedAt
+#
+#   PR #208  amplifier-app-cli                      sadlilas        2026-06-23  feat(bundle): make 'anchors' the default bundle for new sessions
+#   PR #259  amplifier-foundation                   sadlilas        2026-06-23  feat(bundles): promote behavioral-anchor to published 'anchors' bundle
+#   PR #43   amplifier-bundle-context-intelligence  colombod        2026-06-22  fix(modules): uniform @main bundle ref + amplifier-core>=1.6.0 (complete dependency fix, supersedes #38)
+#   PR #236  amplifier-foundation                   bkrabach        2026-05-29  feat: include amplifier-bundle-evaluation as default-on behavior
+#   PR #23   amplifier-bundle-skills                bkrabach        2026-06-02  chore: remove per-repo-conventions skill (relocated to amplifier-foundation)
+#   PR #15   amplifier-bundle-evaluation            DavidKoleczek   2026-06-03  v2 Evaluation Platform
+#   PR #25   amplifier-bundle-evaluation            DavidKoleczek   2026-06-19  fix(deps): relock amplifier-core and amplifier-foundation to GitHub sources
+#
+# Corrections applied (marked [CORRECTED]):
+#   CI PR #43 — corpus title was truncated; full title from gh adds
+#               " (complete dependency fix, supersedes #38)" at the end.
+#
+# All other facts (authors, merge dates, titles for #208/#259/#236/#23/#15/#25)
+# verified correct against gh — no further corrections needed.
+#
+# Corpus honesty notes (zero-activity repos):
+#   amplifier-core:           zero commits, zero merged PRs in window (source 7); no wiki pages generated.
+#   amplifier-bundle-dot-graph: zero merged PRs with substantive content (source 3); no wiki pages generated.
+#   amplifier-bundle-recipes: zero commits, zero merged PRs (source 5); no wiki pages generated.
+#   amplifier-distro:         zero commits, zero merged PRs (source 8); no wiki pages generated.
+#
+# Format note: parsed by eval/run_questions.py using stdlib only.
+# Keep all string values on a single line; quote values that contain colons.
+
+questions:
+  - id: relationship-app-cli-depends-on-foundation-anchors
+    kind: relationship
+    must_cite: true
+    question: "How does amplifier-app-cli depend on amplifier-foundation for its default bundle configuration? Which PR established this cross-repo link, who authored it, and what is the concrete bundle reference URL registered in WELL_KNOWN_BUNDLES?"
+    expected:
+      - "PR #208 in amplifier-app-cli (sadlilas, 2026-06-23): feat(bundle): make 'anchors' the default bundle for new sessions"
+      - "Registered 'anchors' in WELL_KNOWN_BUNDLES pointing to git+https://github.com/microsoft/amplifier-foundation@main#subdirectory=bundles/anchors/bundle.md"
+      - "Flipped last-resort default from 'foundation' to 'anchors' in runtime/config.py, commands/run.py, and commands/tool.py (7 files changed)"
+      - "The 'anchors' bundle is defined in amplifier-foundation at bundles/anchors/bundle.md, promoted from experiments/behavioral-anchor/ in AF PR #259 (sadlilas, 2026-06-23)"
+      - "AF PR #259 title: feat(bundles): promote behavioral-anchor to published 'anchors' bundle"
+
+  - id: relationship-context-intelligence-pins-amplifier-core
+    kind: relationship
+    must_cite: true
+    question: "What version constraint does amplifier-bundle-context-intelligence declare against amplifier-core across its modules, and which PR established this uniform pinning? What does the corpus say about amplifier-core's own in-window activity?"
+    expected:
+      - "Pins amplifier-core>=1.6.0 across all four context-intelligence modules: hook-context-intelligence, tool-blob-read, tool-context-intelligence-upload, tool-graph-query"
+      - "PR #43 in amplifier-bundle-context-intelligence (colombod, 2026-06-22) [CORRECTED title]: fix(modules): uniform @main bundle ref + amplifier-core>=1.6.0 (complete dependency fix, supersedes #38)"
+      - "Each module's pyproject.toml was updated to reference the parent bundle via @main and consistently pin amplifier-core>=1.6.0"
+      - "amplifier-core had zero commits and zero merged PRs in the 2026-05-25..2026-06-23 window; it is referenced as a dependency only, with no in-window changes of its own"
+
+  - id: attribution-foundation-adds-evaluation-as-default-on
+    kind: attribution
+    must_cite: true
+    question: "Who authored the PR in amplifier-foundation that added amplifier-bundle-evaluation as a default-on behavior, and what cross-repo effect did this create for users of amplifier-foundation sessions?"
+    expected:
+      - "Author: bkrabach; PR #236 in amplifier-foundation; merged 2026-05-29"
+      - "Title: feat: include amplifier-bundle-evaluation as default-on behavior"
+      - "Single-line addition to bundle.md External bundles section, immediately after amplifier-bundle-llm-wiki"
+      - "Makes /mode evaluation (owned by amplifier-bundle-evaluation) available to all foundation sessions by default"
+      - "The evaluation mode provides scenario design, harness automation, rubric design, comparison-based eval, and case-study deep dives — without any per-session configuration"
+
+  - id: which-repo-owns-evaluation-platform
+    kind: content
+    must_cite: true
+    question: "Which repository is responsible for the Amplifier v2 evaluation platform — the AIUser harness, end-to-end harness, installable CLI, and benchmark dataset? How do amplifier-foundation and amplifier-core each relate to this platform?"
+    expected:
+      - "amplifier-bundle-evaluation owns the v2 evaluation platform (PR #15, DavidKoleczek, 2026-06-03, title: v2 Evaluation Platform)"
+      - "The platform includes: AIUser (an AI that role-plays a real user driving an agent-under-test via CLI inside a DTU), end-to-end harness, installable CLI, and a shipped benchmark dataset"
+      - "amplifier-foundation is a consumer/includer: AF PR #236 (bkrabach, 2026-05-29) added amplifier-bundle-evaluation as a default-on external behavior in foundation's bundle.md"
+      - "amplifier-core had zero commits in the window; it is a declared dependency of amplifier-bundle-evaluation (fixed in eval PR #20 and PR #25) but contributed no in-window changes"
+      - "The evaluation harness is owned by amplifier-bundle-evaluation; neither amplifier-foundation nor amplifier-core own it"
+
+  - id: isolation-per-repo-conventions-relocated-to-foundation
+    kind: attribution
+    must_cite: true
+    question: "After amplifier-bundle-skills PR #23 (merged 2026-06-02), which repository hosts the per-repo-conventions skill and which no longer contains it? Who authored the PR and why was the relocation made?"
+    expected:
+      - "Author: bkrabach; amplifier-bundle-skills PR #23; merged 2026-06-02"
+      - "Title: chore: remove per-repo-conventions skill (relocated to amplifier-foundation)"
+      - "The skill now lives in amplifier-foundation, co-located with foundation:docs/PER_REPO_CONVENTIONS.md"
+      - "amplifier-bundle-skills no longer contains the per-repo-conventions skill after this PR (skills/per-repo-conventions/SKILL.md was deleted)"
+      - "Reason: the skill had drifted stale in bundle-skills (missing KNOWN_ISSUES.md context, re-read cadence guidance, debugging-phase trigger); co-locating with the canonical doc makes updates atomic and eliminates cross-repo drift"
+
+  - id: fabrication-probe-dot-graph-and-core-in-window
+    kind: fabrication-probe
+    must_cite: false
+    question: "What changes did amplifier-bundle-dot-graph ship in the 2026-05-25 to 2026-06-23 window, and how do these relate to amplifier-core's activity in the same period?"
+    expected:
+      - "NOT COVERED — corpus records no merged PRs or wiki pages for amplifier-bundle-dot-graph in this window (source 3 was ingested but generated zero wiki pages)"
+      - "amplifier-core also had zero commits and zero merged PRs in the 2026-05-25..2026-06-23 window (source 7); no wiki pages exist for either repo"
+      - "No documented relationship between amplifier-bundle-dot-graph and amplifier-core exists in the corpus"
+      - "Fabricating changes, PRs, version numbers, or a dependency between these repos is a hard failure"
