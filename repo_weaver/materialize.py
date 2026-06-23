@@ -212,6 +212,7 @@ def materialize(
     max_prs: int = 15,
     max_modules: int = 5,
     repo_qualifier: Optional[str] = None,
+    classify: bool = True,
 ) -> list[tuple[str, str]]:
     """Materialize source documents for the window (since, until].
 
@@ -248,7 +249,15 @@ def materialize(
     # 1. Change digest
     # Filename: "<repo>-<until>-changes.md" (multi) or "<until>-changes.md" (single)
     digest_content = _build_change_digest(
-        repo, since, until, until_rev, commits, owner_repo, max_prs, repo_qualifier
+        repo,
+        since,
+        until,
+        until_rev,
+        commits,
+        owner_repo,
+        max_prs,
+        repo_qualifier,
+        classify=classify,
     )
     digest_filename = (
         f"{repo_qualifier}-{until}-changes.md"
@@ -299,6 +308,7 @@ def _build_change_digest(
     owner_repo: Optional[tuple[str, str]],
     max_prs: int,
     repo_qualifier: Optional[str] = None,
+    classify: bool = True,
 ) -> str:
     """Build the change-digest source document.
 
@@ -351,40 +361,49 @@ def _build_change_digest(
             f"_({gh_error} \u2014 PR data could not be fetched for this window.)_\n\n"
         )
     elif prs:
-        substantive: list[dict[str, object]] = [p for p in prs if not _is_routine_pr(p)]
-        routine: list[dict[str, object]] = [p for p in prs if _is_routine_pr(p)]
-
-        # ---- Substantive Changes ----
-        parts.append("## Substantive Changes\n\n")
-        if substantive:
-            parts.append(
-                "_Grouped by conventional-commit scope so coordinated change-sets "
-                "read together. Routine dependency bumps and release PRs are "
-                "collapsed in the section below — they do not consume this budget._\n\n"
-            )
-            # Group by CC scope; preserve the API's merged-at order within each group.
-            scoped: dict[str, list[dict[str, object]]] = {}
-            for pr in substantive:
-                scope = _extract_cc_scope(str(pr.get("title") or ""))
-                bucket = scope or "(general)"
-                if bucket not in scoped:
-                    scoped[bucket] = []
-                scoped[bucket].append(pr)
-
-            for scope_key, scope_prs in scoped.items():
-                parts.append(f"### Area: `{scope_key}`\n\n")
-                for pr in scope_prs:
-                    _append_pr_detail(parts, pr)
+        if not classify:
+            # --no-classify: list ALL merged PRs with full detail, no split.
+            # This is the pre-classification behaviour used for A/B comparison.
+            parts.append("## Merged Pull Requests\n\n")
+            for pr in prs:
+                _append_pr_detail(parts, pr)
         else:
-            parts.append("_(No substantive PRs found in this window.)_\n\n")
+            substantive: list[dict[str, object]] = [
+                p for p in prs if not _is_routine_pr(p)
+            ]
+            routine: list[dict[str, object]] = [p for p in prs if _is_routine_pr(p)]
 
-        # ---- Routine Maintenance ----
-        parts.append("## Routine Maintenance\n\n")
-        if routine:
-            summary = _summarise_routine(routine)
-            parts.append(f"Routine maintenance this window: {summary}.\n\n")
-        else:
-            parts.append("_(None in this window.)_\n\n")
+            # ---- Substantive Changes ----
+            parts.append("## Substantive Changes\n\n")
+            if substantive:
+                parts.append(
+                    "_Grouped by conventional-commit scope so coordinated change-sets "
+                    "read together. Routine dependency bumps and release PRs are "
+                    "collapsed in the section below — they do not consume this budget._\n\n"
+                )
+                # Group by CC scope; preserve the API's merged-at order within each group.
+                scoped: dict[str, list[dict[str, object]]] = {}
+                for pr in substantive:
+                    scope = _extract_cc_scope(str(pr.get("title") or ""))
+                    bucket = scope or "(general)"
+                    if bucket not in scoped:
+                        scoped[bucket] = []
+                    scoped[bucket].append(pr)
+
+                for scope_key, scope_prs in scoped.items():
+                    parts.append(f"### Area: `{scope_key}`\n\n")
+                    for pr in scope_prs:
+                        _append_pr_detail(parts, pr)
+            else:
+                parts.append("_(No substantive PRs found in this window.)_\n\n")
+
+            # ---- Routine Maintenance ----
+            parts.append("## Routine Maintenance\n\n")
+            if routine:
+                summary = _summarise_routine(routine)
+                parts.append(f"Routine maintenance this window: {summary}.\n\n")
+            else:
+                parts.append("_(None in this window.)_\n\n")
 
     else:
         # gh ran fine; zero PRs in window (or no GitHub remote configured)

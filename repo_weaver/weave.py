@@ -44,6 +44,56 @@ from . import materialize as mat
 
 
 # ---------------------------------------------------------------------------
+# Resume-from-checkpoint: progress tracking for replay_windows()
+# ---------------------------------------------------------------------------
+
+#: Progress file stored inside the corpus alongside ``.repo-weaver.json``.
+#: Safe to delete: deletion is equivalent to ``--restart`` (redo from scratch).
+_REPLAY_PROGRESS_FILE = ".replay-progress.json"
+
+
+def _window_key(since: str, until: str) -> str:
+    """Return a stable, human-readable key for a ``(since, until)`` pair."""
+    return f"{since}->{until}"
+
+
+def _load_replay_progress(corpus_path: Path) -> set[str]:
+    """Load the set of completed window keys from the progress file.
+
+    Returns an empty set when the file does not exist or is unreadable.
+    A malformed / unreadable file is treated as "no progress" so the run
+    restarts cleanly rather than crashing on a bad JSON file.
+    """
+    prog_file = corpus_path / _REPLAY_PROGRESS_FILE
+    if not prog_file.exists():
+        return set()
+    try:
+        data = json.loads(prog_file.read_text(encoding="utf-8"))
+        completed = data.get("completed_windows", [])
+        if isinstance(completed, list):
+            return {str(k) for k in completed}
+    except (json.JSONDecodeError, OSError):
+        pass
+    return set()
+
+
+def _save_replay_progress(corpus_path: Path, completed: set[str]) -> None:
+    """Atomically write the replay progress file.
+
+    Uses write-to-tmp + ``Path.replace()`` so the file is never left in a
+    half-written state.  The progress file is safe to delete at any time:
+    deletion is equivalent to ``--restart`` (forces a full redo).
+    """
+    data: dict[str, object] = {
+        "version": 1,
+        "completed_windows": sorted(completed),
+    }
+    tmp = corpus_path / (_REPLAY_PROGRESS_FILE + ".tmp")
+    tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    tmp.replace(corpus_path / _REPLAY_PROGRESS_FILE)  # atomic on POSIX
+
+
+# ---------------------------------------------------------------------------
 # Retry / resilience configuration
 # ---------------------------------------------------------------------------
 
@@ -453,6 +503,7 @@ def weave(
     max_cycles: int = _DEFAULT_MAX_CYCLES,
     max_retries: int = _DEFAULT_MAX_RETRIES,
     retry_base_delay: float = _DEFAULT_RETRY_BASE_DELAY,
+    classify: bool = True,
     _sleep: Optional[Callable[[float], None]] = None,
 ) -> int:
     """Materialise source documents and optionally run wiki-weaver ingest.
@@ -506,7 +557,9 @@ def weave(
         print("[repo-weaver] Mode:   dry-run (skipping ingest)\n")
 
     # ---- Materialise ----
-    docs = mat.materialize(repo, since, until, max_prs=max_prs, max_modules=max_modules)
+    docs = mat.materialize(
+        repo, since, until, max_prs=max_prs, max_modules=max_modules, classify=classify
+    )
 
     if not docs:
         print(
@@ -553,6 +606,7 @@ def weave_multi(
     max_cycles: int = _DEFAULT_MAX_CYCLES,
     max_retries: int = _DEFAULT_MAX_RETRIES,
     retry_base_delay: float = _DEFAULT_RETRY_BASE_DELAY,
+    classify: bool = True,
     _sleep: Optional[Callable[[float], None]] = None,
 ) -> int:
     """Materialise source documents for multiple repos and optionally ingest.
@@ -609,6 +663,7 @@ def weave_multi(
             max_cycles=max_cycles,
             max_retries=max_retries,
             retry_base_delay=retry_base_delay,
+            classify=classify,
             _sleep=_sleep,
         )
 
@@ -639,13 +694,13 @@ def weave_multi(
 
     # ---- Phase 2: materialise each repo ----
     all_docs: list[tuple[str, str]] = []
+    corpus_path = Path(corpus)
+    archive_dir = corpus_path / "_archive"
 
     for idx, repo in enumerate(repos, 1):
         repo_qualifier = Path(repo).name  # e.g. "amplifier-app-team-pulse"
 
-        print(f"[repo {idx}/{total}] {repo_qualifier} \u2014 materializing\u2026")
-
-        # Per-repo since resolution.
+        # Per-repo since resolution (needed before the archive-skip check).
         if since is not None:
             effective_since = since
         else:
@@ -656,6 +711,20 @@ def weave_multi(
             else:
                 effective_since = "2000-01-01"
 
+        # Resume skip: if this repo's change digest is already in _archive/
+        # for this window, there is no point materialising and re-ingesting it
+        # (wiki-weaver would dedup-skip it anyway).  Skip loudly so the user
+        # can see what was spared on a resumed run.
+        changes_filename = f"{repo_qualifier}-{effective_until}-changes.md"
+        if archive_dir.exists() and (archive_dir / changes_filename).exists():
+            print(
+                f"[repo {idx}/{total}] {repo_qualifier} \u2014 "
+                f"change digest already archived for window "
+                f"{effective_since} \u2192 {effective_until}; skipping."
+            )
+            continue
+
+        print(f"[repo {idx}/{total}] {repo_qualifier} \u2014 materializing\u2026")
         print(f"[repo-weaver]   Window: {effective_since} \u2192 {effective_until}")
 
         docs = mat.materialize(
@@ -665,6 +734,7 @@ def weave_multi(
             max_prs=max_prs,
             max_modules=max_modules,
             repo_qualifier=repo_qualifier,
+            classify=classify,
         )
 
         if not docs:
@@ -714,3 +784,118 @@ def weave_multi(
         retry_base_delay=retry_base_delay,
         _sleep=_sleep,
     )
+
+
+# ---------------------------------------------------------------------------
+# Replay orchestration: multi-window with resume-from-checkpoint
+# ---------------------------------------------------------------------------
+
+
+def replay_windows(
+    corpus: str,
+    repos: list[str],
+    windows: list[tuple[str, str]],
+    max_prs: int = 15,
+    max_modules: int = 5,
+    max_cycles: int = _DEFAULT_MAX_CYCLES,
+    max_retries: int = _DEFAULT_MAX_RETRIES,
+    retry_base_delay: float = _DEFAULT_RETRY_BASE_DELAY,
+    classify: bool = True,
+    restart: bool = False,
+    _sleep: Optional[Callable[[float], None]] = None,
+) -> int:
+    """Replay successive time windows with resume-from-checkpoint support.
+
+    Progress is tracked in ``<corpus>/.replay-progress.json``.  On a re-run
+    with the same ``windows`` list, completed windows are skipped and
+    processing resumes at the first incomplete one.
+
+    **Fail-loud guarantee**: a window is marked complete ONLY when
+    ``weave_multi`` returns 0.  A window that failed (sources in ``_failed/``,
+    provider error, etc.) is never recorded as done, so the next run
+    re-attempts it — including any sources still in ``_failed/`` from the
+    prior run, which ``_retry_failed_sources`` will pick up and retry.
+
+    Args:
+        corpus:           Path to the wiki corpus directory.
+        repos:            Ordered list of git repo paths.
+        windows:          Ordered list of ``(since, until)`` pairs.
+        classify:         If True (default), classify PRs as routine/substantive.
+                          Pass False to implement ``--no-classify`` A/B testing.
+        restart:          If True, ignore and clear any existing progress file,
+                          forcing a full redo from the first window.
+        *rest:            Forwarded verbatim to ``weave_multi``.
+
+    Returns:
+        0 if all windows completed successfully; non-zero on first failure.
+    """
+    corpus_path = Path(corpus)
+    total = len(windows)
+
+    # ---- Load (or clear) progress ----
+    if restart:
+        prog_file = corpus_path / _REPLAY_PROGRESS_FILE
+        if prog_file.exists():
+            prog_file.unlink()
+            print(
+                "[repo-weaver] --restart: cleared replay progress; redoing all windows."
+            )
+        completed: set[str] = set()
+    else:
+        completed = _load_replay_progress(corpus_path)
+
+    skipped = sum(
+        1 for since, until in windows if _window_key(since, until) in completed
+    )
+    if skipped and not restart:
+        print(
+            f"[repo-weaver] Resume: {skipped}/{total} window(s) already completed; "
+            f"skipping and resuming at the first incomplete window."
+        )
+
+    print(
+        f"[repo-weaver] Replay: {total} window(s) across "
+        f"{len(repos)} repo(s). "
+        "Ingest is sequential and can take several minutes per window.\n"
+    )
+
+    for idx, (since, until) in enumerate(windows, 1):
+        key = _window_key(since, until)
+
+        if key in completed:
+            print(
+                f"[window {idx}/{total}] {since} \u2192 {until}  "
+                "[SKIP \u2014 already completed]"
+            )
+            continue
+
+        print(f"[window {idx}/{total}] {since} \u2192 {until}")
+        rc = weave_multi(
+            corpus=corpus,
+            repos=repos,
+            since=since,
+            until=until,
+            max_prs=max_prs,
+            max_modules=max_modules,
+            dry_run=False,
+            max_cycles=max_cycles,
+            max_retries=max_retries,
+            retry_base_delay=retry_base_delay,
+            classify=classify,
+            _sleep=_sleep,
+        )
+        if rc != 0:
+            print(
+                f"\nERROR: ingest failed for window {since} \u2192 {until} "
+                f"(exit {rc}).  Stopping replay.\n"
+                "[repo-weaver] Re-run without --restart to resume from this window.",
+                file=sys.stderr,
+            )
+            return rc
+
+        # Mark complete ONLY on success — fail-loud guarantee.
+        completed.add(key)
+        _save_replay_progress(corpus_path, completed)
+
+    print("\n[repo-weaver] Replay complete.")
+    return 0

@@ -230,6 +230,7 @@ def cmd_weave(args: argparse.Namespace) -> int:
     """Materialise sources and (unless --dry-run) run wiki-weaver ingest."""
     corpus = args.corpus
     repo_override: Optional[str] = getattr(args, "repo", None)
+    classify: bool = not getattr(args, "no_classify", False)
 
     if repo_override:
         # Explicit --repo override: single-repo path, unqualified filenames (historic behaviour).
@@ -243,6 +244,7 @@ def cmd_weave(args: argparse.Namespace) -> int:
             dry_run=args.dry_run,
             max_cycles=args.max_cycles,
             max_retries=args.max_retries,
+            classify=classify,
         )
 
     # No override: weave all repos recorded in the corpus config.
@@ -265,6 +267,7 @@ def cmd_weave(args: argparse.Namespace) -> int:
         dry_run=args.dry_run,
         max_cycles=args.max_cycles,
         max_retries=args.max_retries,
+        classify=classify,
     )
 
 
@@ -332,46 +335,22 @@ def cmd_replay(args: argparse.Namespace) -> int:
     else:
         start = "2000-01-01"
 
-    # Build list of (since, until) windows
+    # Build ordered list of (since, until) pairs.
     windows = [(start, raw_cutoffs[0])]
     for i in range(len(raw_cutoffs) - 1):
         windows.append((raw_cutoffs[i], raw_cutoffs[i + 1]))
 
-    max_prs: int = getattr(args, "max_prs", 15)
-    max_modules: int = getattr(args, "max_modules", 5)
-    max_cycles: int = getattr(args, "max_cycles", _DEFAULT_MAX_CYCLES)
-    max_retries: int = getattr(args, "max_retries", _DEFAULT_MAX_RETRIES)
-    total_windows = len(windows)
-
-    print(
-        f"[repo-weaver] Replay: {total_windows} window(s) across "
-        f"{len(repos)} repo(s). "
-        "Ingest is sequential and can take several minutes per window.\n"
+    return weave_mod.replay_windows(
+        corpus=corpus,
+        repos=repos,
+        windows=windows,
+        max_prs=getattr(args, "max_prs", 15),
+        max_modules=getattr(args, "max_modules", 5),
+        max_cycles=getattr(args, "max_cycles", _DEFAULT_MAX_CYCLES),
+        max_retries=getattr(args, "max_retries", _DEFAULT_MAX_RETRIES),
+        classify=not getattr(args, "no_classify", False),
+        restart=getattr(args, "restart", False),
     )
-
-    for idx, (since, until) in enumerate(windows, 1):
-        print(f"[window {idx}/{total_windows}] {since} \u2192 {until}")
-        rc = weave_mod.weave_multi(
-            corpus=corpus,
-            repos=repos,
-            since=since,
-            until=until,
-            max_prs=max_prs,
-            max_modules=max_modules,
-            dry_run=False,
-            max_cycles=max_cycles,
-            max_retries=max_retries,
-        )
-        if rc != 0:
-            print(
-                f"\nERROR: ingest failed for window {since} \u2192 {until} "
-                f"(exit {rc}).  Stopping replay.",
-                file=sys.stderr,
-            )
-            return rc
-
-    print("\n[repo-weaver] Replay complete.")
-    return 0
 
 
 # ---------------------------------------------------------------------------
@@ -452,6 +431,16 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Write _inbox files but skip wiki-weaver ingest.",
     )
     p.add_argument(
+        "--no-classify",
+        action="store_true",
+        default=False,
+        help=(
+            "Disable PR classification: list ALL merged PRs with full detail "
+            "instead of splitting into substantive/routine tiers. "
+            "Use for A/B testing whether classification improves the corpus."
+        ),
+    )
+    p.add_argument(
         "--max-cycles",
         type=int,
         default=_DEFAULT_MAX_CYCLES,
@@ -522,6 +511,26 @@ def _build_parser() -> argparse.ArgumentParser:
         default=_DEFAULT_MAX_RETRIES,
         metavar="N",
         help=f"Max per-source retry attempts per window (default: {_DEFAULT_MAX_RETRIES}).",
+    )
+    p.add_argument(
+        "--no-classify",
+        action="store_true",
+        default=False,
+        help=(
+            "Disable PR classification: list ALL merged PRs with full detail "
+            "instead of splitting into substantive/routine tiers. "
+            "Use for A/B testing whether classification improves the corpus."
+        ),
+    )
+    p.add_argument(
+        "--restart",
+        action="store_true",
+        default=False,
+        help=(
+            "Ignore and clear any existing replay progress, forcing a full redo "
+            "from the first window. Without this flag a re-run skips windows that "
+            "already completed and resumes at the first incomplete one."
+        ),
     )
     p.set_defaults(func=cmd_replay)
 
