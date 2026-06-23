@@ -25,6 +25,7 @@ from typing import Optional
 
 from . import gitio
 from . import weave as weave_mod
+from .weave import _DEFAULT_MAX_CYCLES, _DEFAULT_MAX_RETRIES
 
 # Policy schema shipped with repo-weaver (relative to this file).
 # Works for both editable installs (project layout) and wheel installs when
@@ -242,6 +243,8 @@ def cmd_weave(args: argparse.Namespace) -> int:
             max_prs=args.max_prs,
             max_modules=args.max_modules,
             dry_run=args.dry_run,
+            max_cycles=args.max_cycles,
+            max_retries=args.max_retries,
         )
 
     # No override: weave all repos recorded in the corpus config.
@@ -262,6 +265,8 @@ def cmd_weave(args: argparse.Namespace) -> int:
         max_prs=args.max_prs,
         max_modules=args.max_modules,
         dry_run=args.dry_run,
+        max_cycles=args.max_cycles,
+        max_retries=args.max_retries,
     )
 
 
@@ -337,6 +342,8 @@ def cmd_replay(args: argparse.Namespace) -> int:
     banner_width = 60
     max_prs: int = getattr(args, "max_prs", 15)
     max_modules: int = getattr(args, "max_modules", 5)
+    max_cycles: int = getattr(args, "max_cycles", _DEFAULT_MAX_CYCLES)
+    max_retries: int = getattr(args, "max_retries", _DEFAULT_MAX_RETRIES)
 
     for idx, (since, until) in enumerate(windows, 1):
         print(f"\n{'=' * banner_width}")
@@ -350,6 +357,8 @@ def cmd_replay(args: argparse.Namespace) -> int:
             max_prs=max_prs,
             max_modules=max_modules,
             dry_run=False,
+            max_cycles=max_cycles,
+            max_retries=max_retries,
         )
         if rc != 0:
             print(
@@ -440,6 +449,27 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Write _inbox files but skip wiki-weaver ingest.",
     )
+    p.add_argument(
+        "--max-cycles",
+        type=int,
+        default=_DEFAULT_MAX_CYCLES,
+        metavar="N",
+        help=(
+            f"Digest cycle budget passed to wiki-weaver ingest (default: {_DEFAULT_MAX_CYCLES}). "
+            "Increase for dense repos that do not converge in the default budget."
+        ),
+    )
+    p.add_argument(
+        "--max-retries",
+        type=int,
+        default=_DEFAULT_MAX_RETRIES,
+        metavar="N",
+        help=(
+            f"Max per-source retry attempts after a _failed/ event (default: {_DEFAULT_MAX_RETRIES}). "
+            "Each transient-error retry applies exponential back-off; "
+            "each not-converged retry increases --max-cycles."
+        ),
+    )
     p.set_defaults(func=cmd_weave)
 
     # ---- ask ----
@@ -477,6 +507,20 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--max-prs", type=int, default=15, metavar="N")
     p.add_argument("--max-modules", type=int, default=5, metavar="N")
+    p.add_argument(
+        "--max-cycles",
+        type=int,
+        default=_DEFAULT_MAX_CYCLES,
+        metavar="N",
+        help=f"Digest cycle budget per window (default: {_DEFAULT_MAX_CYCLES}).",
+    )
+    p.add_argument(
+        "--max-retries",
+        type=int,
+        default=_DEFAULT_MAX_RETRIES,
+        metavar="N",
+        help=f"Max per-source retry attempts per window (default: {_DEFAULT_MAX_RETRIES}).",
+    )
     p.set_defaults(func=cmd_replay)
 
     return parser
