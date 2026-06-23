@@ -52,3 +52,11 @@ last_updated: YYYY-MM-DD
    Never infer per-PR authorship from the digest's window-level contributor list,
    co-author lines, reviewer handles, or bot names; those appear in a separate
    "Window Contributors" section and are window-level provenance, not PR authorship.
+6. Cross-repo relationships: when a page covers a change or module that references,
+   depends on, promotes, or is referenced by another repo also present in this corpus,
+   the page MUST (a) state that relationship explicitly — naming both repos and the
+   direction of the relationship — and (b) add a `[[wikilink]]` to the related repo's
+   page or topic so both sides are navigable. When the corpus contains both sides of
+   a relationship (e.g. a bundle registration in repo A and the corresponding
+   promotion or definition in repo B), a question about that relationship MUST
+   describe both sides, not just the side whose digest was consulted first.

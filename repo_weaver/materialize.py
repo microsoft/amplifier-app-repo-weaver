@@ -68,6 +68,37 @@ _CC_SCOPE_RE = re.compile(r"^[a-z]+\(([^)]+)\)", re.IGNORECASE)
 # Extracts a short package name from "bump <pkg> from <ver> to <ver>" dependency-bump titles.
 _DEP_BUMP_NAME_RE = re.compile(r"\bbump\s+([\w@./\-]+)\s+from\b", re.IGNORECASE)
 
+# ---------------------------------------------------------------------------
+# Cross-repo reference detection patterns
+# ---------------------------------------------------------------------------
+
+# Pattern 1: GitHub HTTPS and git+https URLs.
+# Captures (org, repo_name); repo_name terminates at the first @, #, /, or ?.
+# Examples matched:
+#   git+https://github.com/microsoft/amplifier-foundation@main#subdirectory=...
+#   https://github.com/microsoft/amplifier-bundle-context-intelligence
+_GITHUB_URL_RE = re.compile(
+    r"(?:git\+)?https://github\.com/([a-zA-Z0-9._-]+)/([a-zA-Z0-9._-]+)"
+)
+
+# Pattern 2: Cross-repo PR/issue references in the form org/repo#NNN.
+# Examples matched:
+#   microsoft/amplifier-docs#12
+#   owner/project-name#99
+_CROSS_REPO_PR_RE = re.compile(
+    r"\b([a-zA-Z0-9][a-zA-Z0-9._-]*)/([a-zA-Z0-9][a-zA-Z0-9._-]*)#(\d+)\b"
+)
+
+# Pattern 3: Amplifier-family package dependency pins and ref tokens.
+# Matches package names starting with "amplifier-" followed by a version
+# constraint or "@" ref.  Examples matched:
+#   amplifier-core>=1.6.0
+#   amplifier-foundation@main
+#   amplifier-bundle-context-intelligence==2.0.0
+_AMPLIFIER_DEP_RE = re.compile(
+    r"\b(amplifier-[a-zA-Z0-9][a-zA-Z0-9-]*)(?:>=|<=|==|!=|~=|@|>|<)\S+"
+)
+
 
 def _is_routine_pr(pr: dict[str, object]) -> bool:
     """Return True if this PR carries little design signal (ROUTINE).
@@ -165,6 +196,85 @@ def _summarise_routine(routine_prs: list[dict[str, object]]) -> str:
         fragments.append(f"{len(routine_prs)} routine PR(s)")
 
     return "; ".join(fragments)
+
+
+# ---------------------------------------------------------------------------
+# Cross-repo reference extraction
+# ---------------------------------------------------------------------------
+
+
+def _extract_cross_repo_refs(
+    prs: list[dict[str, object]],
+    self_repo_name: Optional[str],
+) -> list[tuple[str, str, object]]:
+    """Scan each PR's title and body for references to other repositories.
+
+    Returns a list of ``(other_repo, token, pr_number)`` tuples where:
+
+    - *other_repo*  is the name or package identifier of the referenced repo
+      (e.g. ``"amplifier-foundation"`` or ``"amplifier-core"``).
+    - *token*       is the exact matched text that triggered the detection,
+      truncated to ≤100 chars.
+    - *pr_number*   is the PR number where the reference was found.
+
+    Three signal types are detected (stdlib regex only, conservative):
+
+    1. GitHub HTTPS / git+https URLs  →  extracts ``org/repo`` from the URL.
+    2. Cross-repo PR/issue refs       →  ``org/repo#NNN`` tokens in prose.
+    3. Amplifier-family dep pins      →  ``amplifier-*>=…`` / ``amplifier-*@…``.
+
+    Deduplicates to at most one entry per ``(other_repo, pr_number)`` pair so
+    the same repo referenced by multiple patterns in one PR appears once.
+    Self-references where *other_repo* matches *self_repo_name* are excluded.
+    Never fabricates — every entry is backed by a regex match on real PR text.
+    """
+    results: list[tuple[str, str, object]] = []
+    # (repo_lower, pr_number) → prevents duplicate entries per repo per PR.
+    emitted: set[tuple[str, object]] = set()
+    self_lower = self_repo_name.lower() if self_repo_name else None
+
+    for pr in prs:
+        pr_number = pr.get("number", "?")
+        text = str(pr.get("title") or "") + "\n" + str(pr.get("body") or "")
+
+        # -- Pattern 1: GitHub URLs (https:// and git+https://) --
+        for m in _GITHUB_URL_RE.finditer(text):
+            repo = m.group(2)
+            key: tuple[str, object] = (repo.lower(), pr_number)
+            if (
+                self_lower is None or repo.lower() != self_lower
+            ) and key not in emitted:
+                emitted.add(key)
+                results.append((repo, m.group(0)[:100], pr_number))
+
+        # -- Pattern 2: Cross-repo PR/issue refs (org/repo#NNN) --
+        for m in _CROSS_REPO_PR_RE.finditer(text):
+            repo = m.group(2)
+            key = (repo.lower(), pr_number)
+            if (
+                self_lower is None or repo.lower() != self_lower
+            ) and key not in emitted:
+                emitted.add(key)
+                results.append((repo, m.group(0), pr_number))
+
+        # -- Pattern 3: Amplifier-family dep pins / ref tokens --
+        for m in _AMPLIFIER_DEP_RE.finditer(text):
+            pkg = m.group(1)
+            key = (pkg.lower(), pr_number)
+            if (self_lower is None or pkg.lower() != self_lower) and key not in emitted:
+                emitted.add(key)
+                results.append((pkg, m.group(0)[:80], pr_number))
+
+    return results
+
+
+def _format_cross_repo_section(refs: list[tuple[str, str, object]]) -> str:
+    """Return the markdown ``### Cross-repo references`` section for *refs*."""
+    lines: list[str] = ["### Cross-repo references\n\n"]
+    for other_repo, token, pr_number in refs:
+        lines.append(f"- `{other_repo}` \u2014 `{token}` (PR #{pr_number})\n")
+    lines.append("\n")
+    return "".join(lines)
 
 
 def _append_pr_detail(parts: list[str], pr: dict[str, object]) -> None:
@@ -410,6 +520,15 @@ def _build_change_digest(
         parts.append(
             "## Merged Pull Requests\n\n_(No merged PRs found in this window.)_\n\n"
         )
+
+    # ---- Cross-repo references (aggregated from all PRs in this window) ----
+    # Emitted only when gh returned real PRs; omitted entirely when the list
+    # is empty so no fabricated section appears for windows with no refs.
+    if prs and not gh_error:
+        self_name = owner_repo[1].lower() if owner_repo else None
+        cross_refs = _extract_cross_repo_refs(prs, self_name)
+        if cross_refs:
+            parts.append(_format_cross_repo_section(cross_refs))
 
     # ---- Commit-volume summary ----
     dir_counts: dict[str, int] = {}
