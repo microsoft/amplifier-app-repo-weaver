@@ -638,6 +638,28 @@ def weave(
     if dry_run:
         print("[repo-weaver] Mode:   dry-run (skipping ingest)\n")
 
+    # ---- Archive-skip / idempotency check ----
+    # Compute the qualified filename that materialize() will use for this
+    # repo+window.  If it already lives in _archive/, the window was already
+    # processed — skip loudly rather than re-materialising and re-ingesting.
+    # This mirrors the archive-skip in weave_multi(); both must compute
+    # file_qualifier the same way so the check is always consistent.
+    _origin_url = gitio.get_origin_url(repo)
+    _ar_owner_repo = gitio.parse_owner_repo(_origin_url) if _origin_url else None
+    if _ar_owner_repo is not None:
+        _file_qualifier = f"{_ar_owner_repo[0]}__{_ar_owner_repo[1]}"
+    else:
+        _file_qualifier = Path(repo).name
+    _changes_filename = f"{_file_qualifier}-{until}-changes.md"
+    _archive_dir = Path(corpus) / "_archive"
+    if _archive_dir.exists() and (_archive_dir / _changes_filename).exists():
+        print(
+            f"[repo-weaver] {Path(repo).name} \u2014 "
+            f"change digest already archived for window "
+            f"{since} \u2192 {until}; skipping."
+        )
+        return 0
+
     # ---- Staleness check (Change 4) ----
     _ensure_fresh_clone(repo, no_fetch=no_fetch)
 
@@ -698,8 +720,8 @@ def weave_multi(
     """Materialise source documents for multiple repos and optionally ingest.
 
     When *repos* contains exactly one entry this delegates to ``weave()``
-    so single-repo behaviour is bit-for-bit identical (unqualified filenames,
-    same log output).
+    so single-repo behaviour is bit-for-bit identical (same qualified
+    filenames, same log output, same archive-skip semantics).
 
     When *repos* contains more than one entry:
       * Each repo is validated before materialisation (``git rev-parse

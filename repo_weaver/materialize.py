@@ -2,24 +2,25 @@
 
 Produces a small, high-signal set per window:
 
-1. ONE ``<until>-changes.md`` — merged PRs + commit-volume digest.
-   When ``repo_qualifier`` is set (multi-repo mode) and the owner is known:
-   ``<owner>__<repo>-<until>-changes.md`` (double-underscore org-scoped form).
-   When the owner is unknown (no remote): ``<basename>-<until>-changes.md``.
-2. UP TO ``max_modules`` ``module-<slug>-<until>.md`` files — snapshots of the
-   top-level code directories most changed in the window.
-   When ``repo_qualifier`` is set and owner is known:
-   ``module-<owner>__<repo>-<slug>-<until>.md``.
+1. ONE ``<owner>__<repo>-<until>-changes.md`` — merged PRs + commit-volume
+   digest (org-scoped form when the remote URL is available, e.g.
+   ``bkrabach__amplifier-bundle-skills-2026-06-23-changes.md``).
+   When there is no GitHub remote: ``<basename>-<until>-changes.md``.
+2. UP TO ``max_modules`` ``module-<owner>__<repo>-<slug>-<until>.md`` files —
+   snapshots of the top-level code directories most changed in the window.
+   When there is no remote: ``module-<basename>-<slug>-<until>.md``.
 
-**Single-repo** (``repo_qualifier=None``): filenames are unqualified — identical
-to the historic behaviour, so existing ingested corpora are unaffected.
+**All paths — single-repo and multi-repo — always emit qualified filenames.**
+This prevents silent digest overwrites when two repos are woven one-at-a-time
+into the same corpus with the same ``--until`` date (the SILENT-OVERWRITE bug
+fixed in this module).
 
-**Multi-repo** (``repo_qualifier`` provided): every filename uses the org-scoped
-``owner__repo`` form (when the remote is available) so two repos with the same
-basename but different orgs — e.g. ``bkrabach/amplifier-bundle-skills`` and
-``microsoft/amplifier-bundle-skills`` — never collide.  Document bodies carry
-the human-readable ``owner/repo`` form so the synthesiser puts the org-qualified
-name into ``repos:`` frontmatter.
+**Filename qualifier form:**  ``{owner}__{repo}`` when a GitHub remote is known
+(double-underscore, filesystem-safe), falling back to the repo's directory
+basename when there is no remote.  No owner is ever fabricated.
+
+**Body identity:** Document bodies always show ``owner/repo`` (human-readable)
+when the remote is known, so the synthesiser can derive ``repos:`` frontmatter.
 
 Never fabricates provenance.  All data comes from git plumbing or the gh CLI.
 """
@@ -28,6 +29,7 @@ from __future__ import annotations
 
 import re
 import textwrap
+from pathlib import Path
 from typing import Optional
 
 from . import gitio
@@ -504,8 +506,9 @@ def materialize(
                         human-readable ``owner/repo`` when the remote is known,
                         or the qualifier string when it is not.
 
-                        When None (single-repo mode) filenames are unqualified
-                        — identical to historic behaviour.
+                        When None (single-repo mode) the filename qualifier is
+                        derived from the remote URL (``owner__repo``) or from
+                        the repo's directory basename — never left bare.
 
     Returns:
         List of ``(filename, content)`` pairs ready to write into ``_inbox/``.
@@ -516,18 +519,29 @@ def materialize(
     if origin_url:
         owner_repo = gitio.parse_owner_repo(origin_url)
 
-    # Compute the filesystem-safe qualifier used for filenames.
-    # When the owner is known (remote exists): "{owner}__{repo}" — distinct for
-    # every (owner, repo) pair even when repo basenames collide across orgs.
-    # When the owner is unknown (no remote): fall back to the caller-supplied
-    # qualifier (typically the directory basename) — never fabricate an owner.
-    file_qualifier: Optional[str] = None
-    if repo_qualifier is not None:
-        if owner_repo is not None:
-            file_qualifier = f"{owner_repo[0]}__{owner_repo[1]}"
-        else:
-            # No remote: keep the supplied qualifier as-is (basename fallback).
-            file_qualifier = repo_qualifier
+    # SILENT-OVERWRITE FIX: always compute file_qualifier — never leave it None.
+    #
+    # Previously file_qualifier was only set when repo_qualifier was provided
+    # (multi-repo mode), leaving single-repo calls with a bare "{until}-changes.md"
+    # filename.  Two repos woven one-at-a-time with the same --until date would
+    # therefore SILENTLY OVERWRITE each other's digest in the corpus inbox.
+    #
+    # Now file_qualifier is ALWAYS set regardless of repo_qualifier:
+    #   1. owner__repo  — GitHub remote is known (org-scoped, globally unique).
+    #   2. repo_qualifier — multi-repo basename supplied by the caller.
+    #   3. Path(repo).name — single-repo with no remote; use directory basename.
+    #
+    # Limitation: two local-only repos with the SAME basename and no remote will
+    # still collide (unavoidable without a remote).  No owner is ever fabricated.
+    file_qualifier: str
+    if owner_repo is not None:
+        file_qualifier = f"{owner_repo[0]}__{owner_repo[1]}"
+    elif repo_qualifier is not None:
+        # Multi-repo baseline caller supplies the basename; remote was absent.
+        file_qualifier = repo_qualifier
+    else:
+        # Single-repo with no remote: fall back to the directory basename.
+        file_qualifier = Path(repo).name
 
     until_rev = gitio.get_window_rev(repo, until)
     commits = gitio.get_commits_name_only(repo, since, until)
@@ -535,9 +549,10 @@ def materialize(
     docs: list[tuple[str, str]] = []
 
     # 1. Change digest
-    # Filename: "<owner>__<repo>-<until>-changes.md" (multi, remote known)
-    #         | "<basename>-<until>-changes.md"       (multi, no remote)
-    #         | "<until>-changes.md"                  (single-repo)
+    # Filename: "<owner>__<repo>-<until>-changes.md" (remote known)
+    #         | "<basename>-<until>-changes.md"       (no remote)
+    # file_qualifier is always set (see SILENT-OVERWRITE FIX above) so the
+    # digest filename is always qualified — never a bare "{until}-changes.md".
     digest_content = _build_change_digest(
         repo,
         since,
@@ -549,11 +564,7 @@ def materialize(
         repo_qualifier,
         classify=classify,
     )
-    digest_filename = (
-        f"{file_qualifier}-{until}-changes.md"
-        if file_qualifier
-        else f"{until}-changes.md"
-    )
+    digest_filename = f"{file_qualifier}-{until}-changes.md"
     docs.append((digest_filename, digest_content))
 
     # 2. Module snapshots
@@ -870,15 +881,14 @@ def _build_module_snapshots(
             repo_qualifier,
         )
         if content:
-            # file_qualifier is the org-scoped form (e.g. "owner__repo") when the
-            # remote URL is available, or the basename fallback when it is not.
-            # Multi-repo: "module-<owner>__<repo>-<slug>-<until>.md" (non-colliding)
-            # Single-repo: "module-<slug>-<until>.md"                 (historic, unchanged)
-            fname_prefix = (
+            # file_qualifier is always non-None from materialize() (SILENT-OVERWRITE fix):
+            #   "owner__repo" (remote known) or basename fallback (no remote).
+            # Fallback chain mirrors materialize() so filenames are consistent.
+            _fname_prefix = (
                 file_qualifier if file_qualifier is not None else repo_qualifier
             )
-            if fname_prefix:
-                filename = f"module-{fname_prefix}-{_slug(module_path)}-{until}.md"
+            if _fname_prefix:
+                filename = f"module-{_fname_prefix}-{_slug(module_path)}-{until}.md"
             else:
                 filename = f"module-{_slug(module_path)}-{until}.md"
             results.append((filename, content))

@@ -234,7 +234,7 @@ def cmd_weave(args: argparse.Namespace) -> int:
     no_fetch: bool = getattr(args, "no_fetch", False)
 
     if repo_override:
-        # Explicit --repo override: single-repo path, unqualified filenames (historic behaviour).
+        # Explicit --repo override: single-repo path — qualified filenames.
         return weave_mod.weave(
             corpus=corpus,
             repo=repo_override,
