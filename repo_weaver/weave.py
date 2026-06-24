@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -40,7 +41,41 @@ from pathlib import Path
 from typing import Any, Optional
 
 from . import gitio
-from . import materialize as mat
+from .materialize import materialize as _materialize
+
+# ---------------------------------------------------------------------------
+# Corpus configuration helpers
+# ---------------------------------------------------------------------------
+
+# Policy schema shipped with repo-weaver.  Stored inside the package at
+# repo_weaver/policy/schema.md so it is included in both editable installs
+# and wheel installs (uv tool install) without any extra configuration.
+_POLICY_SCHEMA: Path = Path(__file__).parent / "policy" / "schema.md"
+
+# Filename stored inside each corpus to record the list of registered repos.
+_CORPUS_CONFIG: str = ".repo-weaver.json"
+
+
+def _load_corpus_config(corpus: str) -> dict[str, object]:
+    """Load the corpus config from ``<corpus>/.repo-weaver.json``.
+
+    Returns an empty dict when the file does not exist or is unreadable —
+    callers should treat an empty dict as "no config yet".
+    """
+    cfg_path = Path(corpus) / _CORPUS_CONFIG
+    if cfg_path.exists():
+        try:
+            return json.loads(cfg_path.read_text(encoding="utf-8"))  # type: ignore[return-value]
+        except (json.JSONDecodeError, OSError):
+            return {}
+    return {}
+
+
+def _save_corpus_config(corpus: str, cfg: dict[str, object]) -> None:
+    """Write corpus config to ``<corpus>/.repo-weaver.json``."""
+    cfg_path = Path(corpus) / _CORPUS_CONFIG
+    cfg_path.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+
 
 # ---------------------------------------------------------------------------
 # Clone-staleness guard  (Change 4)
@@ -664,7 +699,7 @@ def weave(
     _ensure_fresh_clone(repo, no_fetch=no_fetch)
 
     # ---- Materialise ----
-    docs = mat.materialize(
+    docs = _materialize(
         repo, since, until, max_prs=max_prs, max_modules=max_modules, classify=classify
     )
 
@@ -851,7 +886,7 @@ def weave_multi(
         # Staleness check (Change 4)
         _ensure_fresh_clone(repo, no_fetch=no_fetch)
 
-        docs = mat.materialize(
+        docs = _materialize(
             repo=repo,
             since=effective_since,
             until=effective_until,
@@ -1025,3 +1060,102 @@ def replay_windows(
 
     print("\n[repo-weaver] Replay complete.")
     return 0
+
+
+# ---------------------------------------------------------------------------
+# Importable lib: init() and ask()
+# ---------------------------------------------------------------------------
+
+
+def init(
+    corpus: str,
+    repos: Optional[list[str]] = None,
+) -> int:
+    """Scaffold a corpus directory and install the code-fit schema.
+
+    This is the importable equivalent of ``repo-weaver init``.  It:
+
+    1. Runs ``wiki-weaver init <corpus> --plain`` to scaffold the wiki layout.
+    2. Copies the bundled ``repo_weaver/policy/schema.md`` into the corpus so
+       that ``wiki-weaver ingest`` understands the code-fit entity model.
+    3. Saves the list of registered repo paths into ``.repo-weaver.json``.
+
+    Args:
+        corpus: Path to the corpus directory (will be created if absent).
+        repos:  Optional list of absolute or relative repo paths to register.
+                Paths are resolved to absolute before saving.  Pass ``None``
+                (or omit) to create a repo-less corpus.
+
+    Returns:
+        0 on success, non-zero on failure (mirrors CLI exit-code convention).
+    """
+    print(f"[repo-weaver] Initialising wiki at {corpus} ...")
+    r = subprocess.run(["wiki-weaver", "init", corpus, "--plain"])
+    if r.returncode != 0:
+        print(
+            f"ERROR: wiki-weaver init failed (exit {r.returncode})",
+            file=sys.stderr,
+        )
+        return r.returncode
+
+    # Install code-fit schema — REQUIRED: a corpus without a schema is broken.
+    if not _POLICY_SCHEMA.exists():
+        print(
+            "ERROR: policy/schema.md not found in the repo-weaver package.\n"
+            "This is required for wiki-weaver to understand the corpus structure.\n"
+            "Reinstall repo-weaver:  pip install --force-reinstall repo-weaver\n"
+            "                   OR:  uv tool install --reinstall repo-weaver",
+            file=sys.stderr,
+        )
+        return 1
+
+    policy_dst = Path(corpus) / "policy"
+    policy_dst.mkdir(parents=True, exist_ok=True)
+    schema_dst = policy_dst / "schema.md"
+    shutil.copy2(_POLICY_SCHEMA, schema_dst)
+    print(f"[repo-weaver] Installed schema: {schema_dst}")
+
+    # Save corpus config (list of repo absolute paths).
+    cfg: dict[str, object] = {}
+    if repos:
+        repo_paths = [str(Path(rp).resolve()) for rp in repos]
+        cfg["repos"] = repo_paths
+        for rp in repo_paths:
+            origin = gitio.get_origin_url(rp)
+            label = f" ({origin})" if origin else ""
+            print(f"[repo-weaver] Registered repo: {rp}{label}")
+
+    _save_corpus_config(corpus, cfg)
+    print(f"[repo-weaver] Corpus config: {Path(corpus) / _CORPUS_CONFIG}")
+    print("[repo-weaver] Done.  Run `repo-weaver weave --corpus <dir>` to populate.")
+    return 0
+
+
+def ask(
+    question: str,
+    corpus: str,
+    output_json: bool = False,
+) -> int:
+    """Query the corpus and print the answer via ``wiki-weaver ask``.
+
+    This is the importable equivalent of ``repo-weaver ask``.  It delegates
+    to ``wiki-weaver ask``, which reads the corpus, retrieves relevant pages,
+    and synthesises a cited answer.  Output is written to stdout exactly as
+    ``wiki-weaver`` produces it.
+
+    Args:
+        question:    The natural-language question to answer.
+        corpus:      Path to an initialised and populated wiki corpus directory.
+        output_json: If True, appends ``--json`` so wiki-weaver returns
+                     ``{"answer": ..., "pages_used": ..., "refused": ...}``
+                     instead of plain text.
+
+    Returns:
+        The exit code from ``wiki-weaver ask`` (0 = answered, non-zero = error
+        or refused).
+    """
+    cmd = ["wiki-weaver", "ask", question, "--wiki", corpus]
+    if output_json:
+        cmd.append("--json")
+    r = subprocess.run(cmd)
+    return r.returncode

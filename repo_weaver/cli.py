@@ -14,41 +14,16 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import shutil
 import subprocess
 import sys
 from datetime import date, timedelta
-from pathlib import Path
 from typing import Optional
 
 from . import gitio
 from . import weave as weave_mod
-from .weave import _DEFAULT_MAX_CYCLES, _DEFAULT_MAX_RETRIES
-
-# Policy schema shipped with repo-weaver.  Stored inside the package at
-# repo_weaver/policy/schema.md so it is included in both editable installs
-# and wheel installs (uv tool install) without any extra configuration.
-_POLICY_SCHEMA = Path(__file__).parent / "policy" / "schema.md"
-
-# Filename stored inside each corpus to record the repo path and origin URL.
-_CORPUS_CONFIG = ".repo-weaver.json"
-
-
-def _load_corpus_config(corpus: str) -> dict[str, object]:
-    cfg_path = Path(corpus) / _CORPUS_CONFIG
-    if cfg_path.exists():
-        try:
-            return json.loads(cfg_path.read_text(encoding="utf-8"))  # type: ignore[return-value]
-        except (json.JSONDecodeError, OSError):
-            return {}
-    return {}
-
-
-def _save_corpus_config(corpus: str, cfg: dict[str, object]) -> None:
-    cfg_path = Path(corpus) / _CORPUS_CONFIG
-    cfg_path.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+from .weave import _DEFAULT_MAX_CYCLES, _DEFAULT_MAX_RETRIES, _POLICY_SCHEMA
 
 
 def _load_corpus_repos(corpus: str) -> list[str]:
@@ -58,7 +33,7 @@ def _load_corpus_repos(corpus: str) -> list[str]:
     format (``"repo": "..."``), so corpora initialised before multi-repo
     support was added continue to work without migration.
     """
-    cfg = _load_corpus_config(corpus)
+    cfg = weave_mod._load_corpus_config(corpus)
     repos_val = cfg.get("repos")
     if isinstance(repos_val, list):
         return [str(r) for r in repos_val if r]
@@ -112,30 +87,37 @@ def cmd_doctor(args: argparse.Namespace) -> int:  # noqa: ARG001
         else:
             rows.append(("gh", True, "authenticated"))
 
-    # GOOGLE_API_KEY — primary key used by wiki-weaver ingest/ask in this environment.
-    # ANTHROPIC_API_KEY is accepted as an alternative by some wiki-weaver backends.
-    google_key = os.environ.get("GOOGLE_API_KEY", "")
+    # LLM provider API keys.
+    # wiki-weaver defaults to anthropic (PROVIDER="anthropic", MODEL="claude-sonnet-4-6").
+    # PASS if AT LEAST ONE of the three supported keys is present; each is shown
+    # individually so the operator can see exactly which providers are configured.
+    # The gate FAILS only when NONE of them are set.
     anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "")
-    if google_key:
-        rows.append(
-            ("GOOGLE_API_KEY", True, "set (primary — used by wiki-weaver ingest)")
+    google_key = os.environ.get("GOOGLE_API_KEY", "")
+    openai_key = os.environ.get("OPENAI_API_KEY", "")
+    any_provider_key = bool(anthropic_key or google_key or openai_key)
+
+    rows.append(
+        (
+            "ANTHROPIC_API_KEY",
+            bool(anthropic_key),
+            "set (wiki-weaver default provider)" if anthropic_key else "not set",
         )
-    elif anthropic_key:
-        rows.append(
-            (
-                "GOOGLE_API_KEY",
-                False,
-                "not set; ANTHROPIC_API_KEY is set (alternative — check wiki-weaver backend)",
-            )
+    )
+    rows.append(
+        (
+            "GOOGLE_API_KEY",
+            bool(google_key),
+            "set" if google_key else "not set",
         )
-    else:
-        rows.append(
-            (
-                "GOOGLE_API_KEY",
-                False,
-                "not set — required for wiki-weaver ingest/ask (set GOOGLE_API_KEY or ANTHROPIC_API_KEY)",
-            )
+    )
+    rows.append(
+        (
+            "OPENAI_API_KEY",
+            bool(openai_key),
+            "set" if openai_key else "not set",
         )
+    )
 
     # policy/schema.md — packaged inside repo_weaver/policy/
     if _POLICY_SCHEMA.exists():
@@ -144,6 +126,9 @@ def cmd_doctor(args: argparse.Namespace) -> int:  # noqa: ARG001
         rows.append(("policy/schema.md", False, "not found (reinstall repo-weaver)"))
 
     # ---- Print table ----
+    # Key names that use the combined provider gate rather than individual gates.
+    _PROVIDER_KEYS = {"ANTHROPIC_API_KEY", "GOOGLE_API_KEY", "OPENAI_API_KEY"}
+
     col_w = max(len(r[0]) for r in rows) + 2
     print(f"\n{'Dependency':<{col_w}}  {'Status':<6}  Detail")
     print("-" * 72)
@@ -152,7 +137,11 @@ def cmd_doctor(args: argparse.Namespace) -> int:  # noqa: ARG001
         sym = "\u2713" if ok else "\u2717"
         label = "OK  " if ok else "FAIL"
         print(f"{name:<{col_w}}  {sym} {label}  {detail}")
-        if not ok:
+        # Provider key rows: only fail the gate when NONE of the three are set.
+        if name in _PROVIDER_KEYS:
+            if not any_provider_key:
+                all_ok = False
+        elif not ok:
             all_ok = False
     print()
 
@@ -163,7 +152,10 @@ def cmd_doctor(args: argparse.Namespace) -> int:  # noqa: ARG001
     print("Some checks failed.  Install hints:")
     print("  wiki-weaver    : pip install wiki-weaver  OR  uv tool install wiki-weaver")
     print("  gh             : https://cli.github.com/")
-    print("  GOOGLE_API_KEY : export GOOGLE_API_KEY=<your-key>")
+    print(
+        "  LLM API key    : export ANTHROPIC_API_KEY=<key>  "
+        "(or GOOGLE_API_KEY / OPENAI_API_KEY)"
+    )
     return 1
 
 
@@ -173,52 +165,10 @@ def cmd_doctor(args: argparse.Namespace) -> int:  # noqa: ARG001
 
 
 def cmd_init(args: argparse.Namespace) -> int:
-    """Scaffold a corpus directory and install the code-fit schema."""
-    corpus = args.corpus_dir
+    """Thin CLI wrapper — delegates to :func:`repo_weaver.weave.init`."""
     # args.repo is list[str] | None  (action="append"; None when flag is absent)
     repo_args: Optional[list[str]] = getattr(args, "repo", None)
-
-    # 1. Scaffold via wiki-weaver
-    print(f"[repo-weaver] Initialising wiki at {corpus} ...")
-    r = subprocess.run(["wiki-weaver", "init", corpus, "--plain"])
-    if r.returncode != 0:
-        print(
-            f"ERROR: wiki-weaver init failed (exit {r.returncode})",
-            file=sys.stderr,
-        )
-        return r.returncode
-
-    # 2. Install code-fit schema — REQUIRED: a corpus without a schema is broken.
-    if not _POLICY_SCHEMA.exists():
-        print(
-            "ERROR: policy/schema.md not found in the repo-weaver package.\n"
-            "This is required for wiki-weaver to understand the corpus structure.\n"
-            "Reinstall repo-weaver:  pip install --force-reinstall repo-weaver\n"
-            "                   OR:  uv tool install --reinstall repo-weaver",
-            file=sys.stderr,
-        )
-        return 1
-
-    policy_dst = Path(corpus) / "policy"
-    policy_dst.mkdir(parents=True, exist_ok=True)
-    schema_dst = policy_dst / "schema.md"
-    shutil.copy2(_POLICY_SCHEMA, schema_dst)
-    print(f"[repo-weaver] Installed schema: {schema_dst}")
-
-    # 3. Save corpus config (list of repo absolute paths)
-    cfg: dict[str, object] = {}
-    if repo_args:
-        repo_paths = [str(Path(rp).resolve()) for rp in repo_args]
-        cfg["repos"] = repo_paths
-        for rp in repo_paths:
-            origin = gitio.get_origin_url(rp)
-            label = f" ({origin})" if origin else ""
-            print(f"[repo-weaver] Registered repo: {rp}{label}")
-
-    _save_corpus_config(corpus, cfg)
-    print(f"[repo-weaver] Corpus config: {Path(corpus) / _CORPUS_CONFIG}")
-    print("[repo-weaver] Done.  Run `repo-weaver weave --corpus <dir>` to populate.")
-    return 0
+    return weave_mod.init(corpus=args.corpus_dir, repos=repo_args)
 
 
 # ---------------------------------------------------------------------------
@@ -280,12 +230,12 @@ def cmd_weave(args: argparse.Namespace) -> int:
 
 
 def cmd_ask(args: argparse.Namespace) -> int:
-    """Pass-through to wiki-weaver ask."""
-    cmd = ["wiki-weaver", "ask", args.question, "--wiki", args.corpus]
-    if args.json:
-        cmd.append("--json")
-    r = subprocess.run(cmd)
-    return r.returncode
+    """Thin CLI wrapper — delegates to :func:`repo_weaver.weave.ask`."""
+    return weave_mod.ask(
+        question=args.question,
+        corpus=args.corpus,
+        output_json=args.json,
+    )
 
 
 # ---------------------------------------------------------------------------

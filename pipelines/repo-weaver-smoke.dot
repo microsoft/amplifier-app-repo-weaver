@@ -1,0 +1,78 @@
+// repo-weaver-smoke.dot — Thinnest provable repo-weaver pipeline.
+//
+// Fail-loud convention (resolver-correct):
+//   parallelogram nodes run tool_command via subprocess. A non-zero exit
+//   code fails the node and halts the pipeline immediately — no silent
+//   green, no retry loop swallows the error. No explicit "fail" routing
+//   is needed; the engine's exit-code→FAIL path IS the fail-loud path.
+//   This is the same convention used by wiki-publish.dot.
+//
+// CWD for ALL tool_command nodes: /project/workspace/ (the cloned repo).
+// Relative paths (.ai/, .) resolve there.
+//
+// Variable substitution (attractor engine):
+//   $task, $since, $until — seeded from resolver.yaml params at dispatch.
+//   ${since:-2026-01-01} syntax = shell-default fallback inside the engine;
+//   safe even when invoked via `attractor run` CLI without the resolver.
+//
+// Node-type discipline:
+//   shape=Mdiamond   → start handler    (pipeline entry)
+//   shape=Msquare    → exit handler     (pipeline exit)
+//   shape=parallelogram → tool handler  (deterministic shell; fail-loud)
+//   shape=box (default) → codergen/LLM  (Amplifier child session + tools)
+
+digraph RepoWeaverSmoke {
+    graph [
+        label="Repo Weaver — Smoke",
+        goal="$task",
+        rankdir=LR,
+        default_max_retry=1,
+        default_fidelity="truncate"
+    ]
+
+    start [shape=Mdiamond]
+    done  [shape=Msquare]
+
+    // Step 1 — Env preflight.
+    // Checks: wiki-weaver on PATH, API key present, any other deps.
+    // Non-zero exit HALTS the pipeline — nothing runs with broken deps.
+    doctor [
+        shape=parallelogram,
+        label="Doctor",
+        tool_command="repo-weaver doctor"
+    ]
+
+    // Step 2 — Materialise git history into the corpus.
+    // init is idempotent (safe to re-run). weave --no-fetch trusts the
+    // existing checkout (the resolver already cloned the repo).
+    // Non-zero exit on either command short-circuits the && chain and
+    // halts the pipeline with the exact error (missing API key, bad date
+    // range, empty window, etc.).
+    weave [
+        shape=parallelogram,
+        label="Weave",
+        tool_command="repo-weaver init .ai/corpus && repo-weaver weave --corpus .ai/corpus --repo . --since ${since:-2026-01-01} --until ${until:-2026-12-31} --max-modules 0 --no-fetch && printf 'weave-ok'"
+    ]
+
+    // Step 3 — Query the corpus (LLM agent, full Amplifier session + tools).
+    // The agent uses the bash tool to call `repo-weaver ask` and writes the
+    // cited answer to .ai/answer.md.
+    // NOTE: $task is expanded by the engine before the LLM sees the prompt.
+    // A task containing a literal double-quote would break the inner command
+    // quoting — use plain questions without embedded quotes (same limitation
+    // as wiki-query.dot's $question).
+    ask [
+        label="Ask",
+        llm_provider="anthropic",
+        llm_model="claude-sonnet-4-6",
+        timeout="300s",
+        prompt="You are running repo-weaver ask as an automated, unattended pipeline node. Your task:\\n\\n  $task\\n\\nSteps:\\n(1) Run this command via bash: repo-weaver ask \"$task\" --corpus .ai/corpus\\n(2) Capture the full output (the cited answer).\\n(3) Write the complete answer to .ai/answer.md using write_file or bash redirection.\\n(4) End with a non-empty one-line summary of what the answer covers."
+    ]
+
+    // Linear flow. Non-zero exits on tool nodes provide all necessary fail-loud
+    // semantics — no explicit failure routing required.
+    start -> doctor
+    doctor -> weave
+    weave -> ask
+    ask -> done
+}

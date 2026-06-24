@@ -1,0 +1,38 @@
+# repo-weaver-smoke.resolver.yaml
+#
+# Sidecar manifest for repo-weaver-smoke.dot. Declares this pipeline to the
+# dot-graph resolver so it appears in the Resolve UI picker with a typed form.
+#
+# Discovery: drop both this file and repo-weaver-smoke.dot into
+#   src/amplifier_resolver_dot_graph/pipelines/
+# inside the installed amplifier-resolver-dot-graph package, then restart
+# the backend (or amplifier-resolve restart in DTU dev mode).
+#
+# Params are seeded into the pipeline engine's context at dispatch time.
+# The engine substitutes $task, $since, $until into the DOT before execution.
+# The `default` field also causes the UI to pre-fill the form field AND acts
+# as a layer-2 fallback for direct API/CLI callers that bypass the UI.
+# Shell-level fallbacks (${since:-2026-01-01}) in tool_command lines are the
+# layer-1 floor and work regardless of invocation path.
+
+name: "Repo Weaver — Smoke"
+description: >
+  Minimal end-to-end repo-weaver pipeline: env doctor check → materialise
+  git history into a local wiki-weaver corpus → ask a question.
+  Fails loud if repo-weaver / wiki-weaver are not on PATH or the LLM API
+  key is absent. Runs against the repo that the resolver has cloned into
+  /project/workspace/.
+pipeline: repo-weaver-smoke.dot
+params:
+  task:
+    input: longText
+    label: "Question / scope"
+    required: true
+  since:
+    input: text
+    label: "History start (YYYY-MM-DD)"
+    default: "2026-01-01"
+  until:
+    input: text
+    label: "History end (YYYY-MM-DD)"
+    default: "2026-12-31"
