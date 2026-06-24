@@ -19,7 +19,7 @@ ISO dates, backtick-quoted identifiers) and traces each against two corpora:
 
 Each token is classified:
 
-  GROUNDED         Token appears as an exact substring in at least one SOURCE doc.
+  GROUNDED         Token appears (after normalization) in at least one SOURCE doc.
                    Traceable to real input fed to the materialiser.
 
   SYNTHESIZED_ONLY Token appears in a WIKI page but NOT in any SOURCE doc.
@@ -30,13 +30,26 @@ Each token is classified:
                    Present only in the ask-time answer — the strongest
                    confabulation candidate.
 
+NORMALIZATION
+-------------
+Before matching, both the token and the corpus text are passed through a
+conservative normalization step so trivially-equivalent forms match:
+
+  - Case-folding (ASCII and Unicode casefold).
+  - Smart-quote → ASCII-quote substitution.
+  - Leading ``v``/``V`` stripped from version tokens (``v8.0.16`` → ``8.0.16``).
+  - Internal whitespace collapsed to a single space.
+
+Only forms that represent the *same fact* are normalized.  Digits and numbers
+are never altered so distinct versions (``8.0.16`` vs ``9.9.9``) stay distinct.
+
 HEURISTIC CAVEAT
 ----------------
-Matching is exact-substring, case-sensitive.  A real claim phrased differently
-than the source (e.g. "78 passing tests" vs "78 pass") may show as
-SYNTHESIZED_ONLY or UNGROUNDED even though the underlying fact is grounded.
-This tool SURFACES candidates for a judge to adjudicate; it does not convict.
-Pair it with the judge for a complete verdict.
+Matching is case-insensitive exact-substring after normalization.  A real claim
+phrased differently than the source (e.g. "78 passing tests" vs "78 pass") may
+show as SYNTHESIZED_ONLY or UNGROUNDED even though the underlying fact is
+grounded.  This tool SURFACES candidates for a judge to adjudicate; it does not
+convict.  Pair it with the judge for a complete verdict.
 
 EXIT CODES
 ----------
@@ -190,6 +203,47 @@ def _load_corpus_texts(corpus: Path) -> tuple[dict[str, str], dict[str, str]]:
 
 
 # ---------------------------------------------------------------------------
+# Normalization for grounding comparison
+# ---------------------------------------------------------------------------
+
+# Semver-like pattern: one or more numeric segments separated by dots,
+# immediately preceded by a word-boundary + v/V prefix.
+# Examples: v8.0.16 → 8.0.16   v2 → 2   V1.2.3 → 1.2.3
+_VPFX_RE = re.compile(r"\bv(\d+(?:\.\d+)*)\b", re.IGNORECASE)
+
+
+def _normalize_for_match(s: str) -> str:
+    """Conservative normalization applied to BOTH token and source text.
+
+    Matches trivially-equivalent forms so faithful reformatting is not
+    penalized as UNGROUNDED.  Only normalizes forms that represent the
+    *same fact* — digits and distinct numbers are never altered.
+
+    Transformations (in order):
+      1. Strip leading v/V from semver-like tokens  (v8.0.16 → 8.0.16)
+      2. Smart-quote → ASCII-quote substitution
+      3. Unicode case-fold (handles é/É, German ß, etc.)
+      4. Collapse internal whitespace to a single space
+    """
+    # 1. v-prefix removal before a digit sequence
+    s = _VPFX_RE.sub(r"\1", s)
+    # 2. Smart quotes → ASCII
+    s = (
+        s.replace("\u2018", "'")
+        .replace("\u2019", "'")
+        .replace("\u201c", '"')
+        .replace("\u201d", '"')
+        .replace("\u2014", "--")  # em-dash → double-hyphen
+        .replace("\u2013", "-")  # en-dash → hyphen
+    )
+    # 3. Case-fold
+    s = s.casefold()
+    # 4. Collapse whitespace
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+
+# ---------------------------------------------------------------------------
 # Per-token classification
 # ---------------------------------------------------------------------------
 
@@ -203,15 +257,23 @@ def _classify(
 
     classification : "GROUNDED" | "SYNTHESIZED_ONLY" | "UNGROUNDED"
     matched_file   : name of the first file the token was found in, or ""
+
+    Matching uses _normalize_for_match() on both the token and the corpus
+    text so trivially-equivalent forms (e.g. ``v8.0.16`` vs ``8.0.16``,
+    smart-quotes vs ASCII) are treated as the same fact.  Distinct values
+    (e.g. ``8.0.16`` vs ``9.9.9``) remain distinct — normalization never
+    conflates different numbers.
     """
+    norm_token = _normalize_for_match(token)
+
     # Check source docs first (strongest signal)
     for fname, text in source_docs.items():
-        if token in text:
+        if norm_token in _normalize_for_match(text):
             return "GROUNDED", f"_archive/{fname}"
 
     # Check wiki pages
     for fname, text in wiki_pages.items():
-        if token in text:
+        if norm_token in _normalize_for_match(text):
             return "SYNTHESIZED_ONLY", fname
 
     return "UNGROUNDED", ""

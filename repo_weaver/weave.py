@@ -42,6 +42,84 @@ from typing import Any, Optional
 from . import gitio
 from . import materialize as mat
 
+# ---------------------------------------------------------------------------
+# Clone-staleness guard  (Change 4)
+# ---------------------------------------------------------------------------
+
+
+def _ensure_fresh_clone(repo: str, no_fetch: bool = False) -> None:
+    """Warn (and optionally fast-forward) when a local clone is behind origin.
+
+    When ``no_fetch=False`` (default):
+
+    1. ``git fetch origin`` is run to update remote refs.
+    2. If the local clone is behind ``origin/<default_branch>`` the user
+       is warned with the repo name and the commit-count delta.
+    3. When the working tree is clean a ``git merge --ff-only`` is attempted
+       so subsequent materialisation runs on fresh state.  On success a
+       confirmation line is printed.
+    4. If the tree is dirty or the fast-forward fails, a loud warning is
+       printed and processing continues with the stale local state — the
+       empty-window silent-wrong-result is avoided.
+
+    When ``no_fetch=True``:
+       Skips the network check entirely.  Use for offline/repeatable runs.
+
+    Never raises — all git failures are printed as warnings.
+    """
+    if no_fetch:
+        return
+
+    repo_name = Path(repo).name
+    origin_url = gitio.get_origin_url(repo)
+    if not origin_url:
+        # No remote configured — nothing to check.
+        return
+
+    fetch_ok = gitio.fetch_origin(repo)
+    if not fetch_ok:
+        print(
+            f"[repo-weaver] WARNING: git fetch failed for {repo_name!r} — "
+            "proceeding with local state (may be stale).",
+            file=sys.stderr,
+        )
+        return
+
+    default_branch = gitio.get_default_branch(repo)
+    behind = gitio.commits_behind_origin(repo, default_branch)
+
+    if behind == 0:
+        return  # Up to date; no action needed.
+
+    print(
+        f"[repo-weaver] WARNING: {repo_name!r} is {behind} commit(s) behind "
+        f"origin/{default_branch} — windows may be incomplete.",
+        file=sys.stderr,
+    )
+
+    if gitio.is_working_tree_clean(repo):
+        print(
+            f"[repo-weaver] Attempting fast-forward: "
+            f"git merge --ff-only origin/{default_branch}"
+        )
+        if gitio.fast_forward_origin(repo, default_branch):
+            print(
+                f"[repo-weaver] Fast-forward succeeded — proceeding on fresh state "
+                f"({behind} new commit(s) applied)."
+            )
+        else:
+            print(
+                f"[repo-weaver] WARNING: fast-forward failed for {repo_name!r} — "
+                "proceeding with stale local state.",
+                file=sys.stderr,
+            )
+    else:
+        print(
+            f"[repo-weaver] WARNING: working tree of {repo_name!r} is dirty — "
+            "cannot fast-forward.  Proceeding with stale local state.",
+            file=sys.stderr,
+        )
+
 
 # ---------------------------------------------------------------------------
 # Resume-from-checkpoint: progress tracking for replay_windows()
@@ -504,6 +582,7 @@ def weave(
     max_retries: int = _DEFAULT_MAX_RETRIES,
     retry_base_delay: float = _DEFAULT_RETRY_BASE_DELAY,
     classify: bool = True,
+    no_fetch: bool = False,
     _sleep: Optional[Callable[[float], None]] = None,
 ) -> int:
     """Materialise source documents and optionally run wiki-weaver ingest.
@@ -522,6 +601,9 @@ def weave(
                           handle active repos.
         max_retries:      Max per-source retry attempts after a ``_failed/`` event.
         retry_base_delay: Base exponential back-off delay in seconds (transient).
+        classify:         If True (default), classify PRs as routine/substantive.
+        no_fetch:         If True, skip ``git fetch`` staleness check before
+                          materialising.  Use for offline/repeatable runs.
         _sleep:           Injectable sleep callable (tests pass a no-op).
 
     Returns:
@@ -555,6 +637,9 @@ def weave(
     print(f"[repo-weaver] Corpus: {corpus}")
     if dry_run:
         print("[repo-weaver] Mode:   dry-run (skipping ingest)\n")
+
+    # ---- Staleness check (Change 4) ----
+    _ensure_fresh_clone(repo, no_fetch=no_fetch)
 
     # ---- Materialise ----
     docs = mat.materialize(
@@ -607,6 +692,7 @@ def weave_multi(
     max_retries: int = _DEFAULT_MAX_RETRIES,
     retry_base_delay: float = _DEFAULT_RETRY_BASE_DELAY,
     classify: bool = True,
+    no_fetch: bool = False,
     _sleep: Optional[Callable[[float], None]] = None,
 ) -> int:
     """Materialise source documents for multiple repos and optionally ingest.
@@ -664,6 +750,7 @@ def weave_multi(
             max_retries=max_retries,
             retry_base_delay=retry_base_delay,
             classify=classify,
+            no_fetch=no_fetch,
             _sleep=_sleep,
         )
 
@@ -726,6 +813,9 @@ def weave_multi(
 
         print(f"[repo {idx}/{total}] {repo_qualifier} \u2014 materializing\u2026")
         print(f"[repo-weaver]   Window: {effective_since} \u2192 {effective_until}")
+
+        # Staleness check (Change 4)
+        _ensure_fresh_clone(repo, no_fetch=no_fetch)
 
         docs = mat.materialize(
             repo=repo,
@@ -802,6 +892,7 @@ def replay_windows(
     retry_base_delay: float = _DEFAULT_RETRY_BASE_DELAY,
     classify: bool = True,
     restart: bool = False,
+    no_fetch: bool = False,
     _sleep: Optional[Callable[[float], None]] = None,
 ) -> int:
     """Replay successive time windows with resume-from-checkpoint support.
@@ -882,6 +973,7 @@ def replay_windows(
             max_retries=max_retries,
             retry_base_delay=retry_base_delay,
             classify=classify,
+            no_fetch=no_fetch,
             _sleep=_sleep,
         )
         if rc != 0:

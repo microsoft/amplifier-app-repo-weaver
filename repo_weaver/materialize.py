@@ -277,8 +277,21 @@ def _format_cross_repo_section(refs: list[tuple[str, str, object]]) -> str:
     return "".join(lines)
 
 
-def _append_pr_detail(parts: list[str], pr: dict[str, object]) -> None:
-    """Append the full detail block for one substantive PR to *parts*."""
+def _append_pr_detail(
+    parts: list[str],
+    pr: dict[str, object],
+    pr_url: Optional[str] = None,
+) -> None:
+    """Append the full detail block for one substantive PR to *parts*.
+
+    Args:
+        parts:  Accumulator list of markdown fragments.
+        pr:     PR dict from ``gh pr list --json``.
+        pr_url: Full GitHub URL for this PR
+                (e.g. ``https://github.com/owner/repo/pull/42``).
+                When provided, emitted as a ``**URL:**`` field so the
+                synthesizer can use it in the ``log`` page entry.
+    """
     n = pr.get("number", "?")
     title = pr.get("title") or "(no title)"
     raw_body = pr.get("body") or ""
@@ -302,6 +315,8 @@ def _append_pr_detail(parts: list[str], pr: dict[str, object]) -> None:
     parts.append(f"### PR #{n}: {title}\n\n")
     parts.append(f"- **Author (PR opener):** {author_name}\n")
     parts.append(f"- **Merged:** {merged_at}\n")
+    if pr_url:
+        parts.append(f"- **URL:** {pr_url}\n")
     parts.append(f"- **Files changed:** {file_count}\n")
     if top_paths:
         parts.append(f"- **Key paths:** {', '.join(top_paths)}\n")
@@ -463,6 +478,13 @@ def _build_change_digest(
             f"{owner}/{name}", since, until, max_fetch=fetch_cap
         )
 
+    # Helper: build the GitHub pull-request URL when owner_repo is available.
+    def _pr_url(pr_number: object) -> Optional[str]:
+        if owner_repo is None:
+            return None
+        o, n_ = owner_repo
+        return f"https://github.com/{o}/{n_}/pull/{pr_number}"
+
     if gh_error:
         # gh failed — surface the error explicitly so it's never mistaken for
         # genuine zero-PR activity (callers can distinguish the two cases).
@@ -476,7 +498,7 @@ def _build_change_digest(
             # This is the pre-classification behaviour used for A/B comparison.
             parts.append("## Merged Pull Requests\n\n")
             for pr in prs:
-                _append_pr_detail(parts, pr)
+                _append_pr_detail(parts, pr, pr_url=_pr_url(pr.get("number")))
         else:
             substantive: list[dict[str, object]] = [
                 p for p in prs if not _is_routine_pr(p)
@@ -503,7 +525,7 @@ def _build_change_digest(
                 for scope_key, scope_prs in scoped.items():
                     parts.append(f"### Area: `{scope_key}`\n\n")
                     for pr in scope_prs:
-                        _append_pr_detail(parts, pr)
+                        _append_pr_detail(parts, pr, pr_url=_pr_url(pr.get("number")))
             else:
                 parts.append("_(No substantive PRs found in this window.)_\n\n")
 

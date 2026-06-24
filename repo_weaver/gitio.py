@@ -1,8 +1,12 @@
-"""Read-only git and gh subprocess helpers.
+"""Git and gh subprocess helpers.
 
-All functions are side-effect free with respect to the target repo: they only
-read (log, show, ls-tree, shortlog, rev-list, remote get-url) and never write
-to the working tree or index.
+Most functions are read-only (log, show, ls-tree, shortlog, rev-list,
+remote get-url) and do not modify the working tree.
+
+The staleness-check helpers — :func:`fetch_origin`, :func:`fast_forward_origin`
+— intentionally have side effects on the clone (fetch updates remote refs;
+fast-forward advances HEAD).  They are called only when the caller explicitly
+requests a freshness check (i.e. when ``--no-fetch`` is not set).
 """
 
 from __future__ import annotations
@@ -315,3 +319,98 @@ def gh_merged_prs(
             result.append(pr)
 
     return result, None
+
+
+# ---------------------------------------------------------------------------
+# Clone-staleness helpers  (Change 4: fetch-or-warn guard)
+# ---------------------------------------------------------------------------
+
+
+def get_default_branch(repo: str) -> str:
+    """Return the name of the default branch for the ``origin`` remote.
+
+    Tries ``git symbolic-ref --short refs/remotes/origin/HEAD`` first
+    (works on any clone where the remote HEAD was set at clone time or
+    via ``git remote set-head origin -a``).  Falls back to parsing
+    ``git remote show origin`` (requires a network round-trip but is
+    reliable).  Returns ``"main"`` if all detection methods fail.
+
+    Does NOT mutate the repo.
+    """
+    r = _run(["git", "-C", repo, "symbolic-ref", "--short", "refs/remotes/origin/HEAD"])
+    if r.returncode == 0 and r.stdout.strip():
+        # e.g. "origin/main" → "main"
+        ref = r.stdout.strip()
+        parts = ref.split("/", 1)
+        return parts[1] if len(parts) == 2 else parts[0]
+
+    # Slow fallback: parse the output of `git remote show origin`.
+    # This contacts the remote server, so it's only reached when the
+    # symbolic-ref isn't set locally.
+    r2 = _run(["git", "-C", repo, "remote", "show", "origin"])
+    if r2.returncode == 0:
+        for line in r2.stdout.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("HEAD branch:"):
+                branch = stripped.split(":", 1)[1].strip()
+                if branch and branch != "(unknown)":
+                    return branch
+
+    return "main"
+
+
+def fetch_origin(repo: str) -> bool:
+    """Run ``git fetch origin`` against *repo*.
+
+    Returns True if the fetch succeeded (exit 0), False otherwise.
+    This is the only function in this module with a remote-network side
+    effect — it updates ``refs/remotes/origin/*`` in the local clone.
+    """
+    r = _run(["git", "-C", repo, "fetch", "origin"])
+    return r.returncode == 0
+
+
+def commits_behind_origin(repo: str, branch: str) -> int:
+    """Return how many commits HEAD is behind ``origin/<branch>``.
+
+    Requires that ``refs/remotes/origin/<branch>`` exists (i.e. a prior
+    ``git fetch`` has been done).  Returns 0 on any error so callers can
+    treat an inability-to-check as "not stale" rather than crashing.
+    """
+    r = _run(
+        [
+            "git",
+            "-C",
+            repo,
+            "rev-list",
+            "--count",
+            f"HEAD..origin/{branch}",
+        ]
+    )
+    if r.returncode != 0 or not r.stdout.strip():
+        return 0
+    try:
+        return int(r.stdout.strip())
+    except ValueError:
+        return 0
+
+
+def is_working_tree_clean(repo: str) -> bool:
+    """Return True if the working tree has no uncommitted changes.
+
+    Uses ``git status --porcelain``: any output means the tree is dirty.
+    Returns False on git errors (conservative — treat unknown as dirty).
+    """
+    r = _run(["git", "-C", repo, "status", "--porcelain"])
+    return r.returncode == 0 and not r.stdout.strip()
+
+
+def fast_forward_origin(repo: str, branch: str) -> bool:
+    """Attempt to fast-forward HEAD to ``origin/<branch>``.
+
+    Uses ``git merge --ff-only origin/<branch>`` so it refuses to create
+    a merge commit.  Returns True on success, False if the fast-forward
+    was not possible or git returned non-zero.
+    """
+    r = _run(["git", "-C", repo, "merge", "--ff-only", f"origin/{branch}"])
+    return r.returncode == 0

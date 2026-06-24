@@ -231,6 +231,7 @@ def cmd_weave(args: argparse.Namespace) -> int:
     corpus = args.corpus
     repo_override: Optional[str] = getattr(args, "repo", None)
     classify: bool = not getattr(args, "no_classify", False)
+    no_fetch: bool = getattr(args, "no_fetch", False)
 
     if repo_override:
         # Explicit --repo override: single-repo path, unqualified filenames (historic behaviour).
@@ -245,6 +246,7 @@ def cmd_weave(args: argparse.Namespace) -> int:
             max_cycles=args.max_cycles,
             max_retries=args.max_retries,
             classify=classify,
+            no_fetch=no_fetch,
         )
 
     # No override: weave all repos recorded in the corpus config.
@@ -268,6 +270,7 @@ def cmd_weave(args: argparse.Namespace) -> int:
         max_cycles=args.max_cycles,
         max_retries=args.max_retries,
         classify=classify,
+        no_fetch=no_fetch,
     )
 
 
@@ -350,6 +353,7 @@ def cmd_replay(args: argparse.Namespace) -> int:
         max_retries=getattr(args, "max_retries", _DEFAULT_MAX_RETRIES),
         classify=not getattr(args, "no_classify", False),
         restart=getattr(args, "restart", False),
+        no_fetch=getattr(args, "no_fetch", False),
     )
 
 
@@ -461,6 +465,18 @@ def _build_parser() -> argparse.ArgumentParser:
             "each not-converged retry increases --max-cycles."
         ),
     )
+    p.add_argument(
+        "--no-fetch",
+        action="store_true",
+        default=False,
+        dest="no_fetch",
+        help=(
+            "Skip the git fetch staleness check before materialising. "
+            "Use for offline or repeatable runs where a network call to origin "
+            "is undesirable. Without this flag, repo-weaver fetches from origin "
+            "and warns (or fast-forwards) when the local clone is behind."
+        ),
+    )
     p.set_defaults(func=cmd_weave)
 
     # ---- ask ----
@@ -530,6 +546,16 @@ def _build_parser() -> argparse.ArgumentParser:
             "Ignore and clear any existing replay progress, forcing a full redo "
             "from the first window. Without this flag a re-run skips windows that "
             "already completed and resumes at the first incomplete one."
+        ),
+    )
+    p.add_argument(
+        "--no-fetch",
+        action="store_true",
+        default=False,
+        dest="no_fetch",
+        help=(
+            "Skip the git fetch staleness check before materialising each window. "
+            "Use for offline or repeatable replay runs."
         ),
     )
     p.set_defaults(func=cmd_replay)
