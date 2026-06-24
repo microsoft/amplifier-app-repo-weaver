@@ -118,6 +118,53 @@ per-repo subsection.
 - **Index and overview group by repo.** See the `index` and `overview` type
   descriptions above for the required per-repo grouping.
 
+## REPO-IDENTITY rules
+
+These rules guard against a class of synthesis error: two repos with the same basename but
+**different owners** silently merged into one entity, or a fictional rename/transfer narrated
+from plausible-but-unsourced clues. See also Quality rule 9.
+
+### RI-1 — SAME NAME ≠ SAME REPO
+
+`owner/repo` is the canonical identity — **never** the bare repo name alone. Two repos that
+share a basename but have **different owners** (e.g. `bkrabach/amplifier-bundle-skills` and
+`microsoft/amplifier-bundle-skills`) are **DISTINCT repositories** and MUST be represented
+as **SEPARATE subjects and SEPARATE pages**. Never merge them into one entity because their
+names match. Apply the org-scoped qualifier everywhere — page titles, slugs, body text,
+frontmatter `repos:` — so every reference is unambiguous.
+
+### RI-2 — No inferred lineage (rename, transfer, fork-merge, "formerly known as")
+
+NEVER assert that two repos are the same repo, were renamed, were transferred, were
+fork-merged, or are "formerly known as" each other UNLESS there is **explicit lineage
+evidence in an ingested source** — e.g. an actual commit message, PR body, or redirect
+notice that **states** the rename or transfer. The following are **NOT** sufficient evidence:
+
+- A shared basename
+- Similar or identical README text
+- Overlapping early commit history
+- Plausibility ("it looks like a fork of…")
+
+If you cannot cite the lineage claim to a **specific ingested source id**, do not make it.
+
+### RI-3 — Fail loud on ambiguity
+
+When two same-named-different-owner repos appear in the corpus and you cannot confirm their
+relationship from the sources, state the ambiguity plainly rather than narrating a clean
+rename or silently merging them. Required form (adapt as needed):
+
+> "Two repos share this name: `owner-a/foo` and `owner-b/foo`. They are tracked as
+> distinct repos; the ingested sources do not establish that they are the same repo."
+
+This mirrors the cite-or-omit discipline: do not fabricate a relationship to produce a
+tidy story.
+
+### RI-4 — Identity consistency across all pages
+
+A repo's identity MUST be represented **consistently** across all pages in the corpus.
+Do not describe two repos as "the same repository" on one page while treating them as
+distinct on another. Contradiction between pages on repo identity is a synthesis defect.
+
 ## Linking convention
 
 - `[[ConceptName]]` / `[[ModuleName]]` / `[[CapabilityName]]` to cross-reference.
@@ -149,3 +196,11 @@ per-repo subsection.
    chronological index. Never answer "unknown" for a date or PR number that may be
    recorded in `log`. The `log` line format includes the full GitHub URL so every
    merge event is traceable.
+9. **REPO-IDENTITY** (see the REPO-IDENTITY rules section for full detail). `owner/repo`
+   is the canonical identity — never the bare repo name alone. Two repos sharing a basename
+   but different owners are **DISTINCT** and must be **SEPARATE pages**; never merge them.
+   Never infer a rename, transfer, fork-merge, or "formerly known as" relationship without
+   explicit cited evidence in an ingested source. When same-named-different-owner repos
+   appear and their relationship cannot be sourced, state the ambiguity plainly (see RI-3)
+   rather than narrating a clean identity. A repo's identity must be consistent across
+   all pages — contradiction between pages is a synthesis defect.
