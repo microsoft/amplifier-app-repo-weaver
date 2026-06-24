@@ -14,6 +14,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import importlib
 import os
 import shutil
 import subprocess
@@ -22,8 +23,16 @@ from datetime import date, timedelta
 from typing import Optional
 
 from . import gitio
-from . import weave as weave_mod
 from .weave import _DEFAULT_MAX_CYCLES, _DEFAULT_MAX_RETRIES, _POLICY_SCHEMA
+
+# repo_weaver/__init__.py exports a public function also named ``weave``, which
+# shadows the submodule when accessed as a package attribute.  Both of these
+# idiomatic forms bind weave_mod to the *function*, not the module:
+#   from . import weave as weave_mod          # IMPORT_FROM on parent → function
+#   import repo_weaver.weave as weave_mod     # same IMPORT_FROM bytecode → function
+# importlib.import_module bypasses attribute lookup and returns sys.modules directly,
+# so we always get the module regardless of __init__.py exports.
+weave_mod = importlib.import_module("repo_weaver.weave")
 
 
 def _load_corpus_repos(corpus: str) -> list[str]:
