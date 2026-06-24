@@ -1,0 +1,76 @@
+digraph leverage_levels {
+  label="Four leverage levels — wiki-weaver vs repo-weaver\nportability / reusability of each command surface";
+  labelloc="t";
+  fontname="Helvetica";
+  fontsize=17;
+  rankdir=TB;
+  nodesep=0.35;
+  ranksep=0.55;
+  node [fontname="Helvetica", fontsize=10, style=filled, shape=box];
+  edge [style=invis];
+
+  // ---------------- column headers ----------------
+  h_level [label="Leverage Level", fillcolor="#dae8fc", color="#6c8ebf", fontname="Helvetica-Bold", fontsize=12];
+  h_ww    [label="wiki-weaver\n(the engine)", fillcolor="#dae8fc", color="#6c8ebf", fontname="Helvetica-Bold", fontsize=12];
+  h_rw    [label="repo-weaver\n(the front-end)", fillcolor="#dae8fc", color="#6c8ebf", fontname="Helvetica-Bold", fontsize=12];
+
+  // ---------------- L1 ----------------
+  l1_desc [label="L1 — Standalone .dot files\n(per-command + shared subgraph)", shape=folder, fillcolor="#f5f5f5", color="#999999"];
+  l1_ww   [label="PRESENT\ninit / ingest / ask / lint.dot\n+ synthesize.dot", shape=folder, fillcolor="#d5e8d4", color="#82b366"];
+  l1_rw   [label="ABSENT\ndrives wiki-weaver's .dot\nvia subprocess", fillcolor="#f8cecc", color="#b85450"];
+
+  // ---------------- L2 ----------------
+  l2_desc [label="L2 — Python lib\n(methods per command; AmplifierSession\n+ custom orchestrator runs the .dot files)", fillcolor="#f5f5f5", color="#999999"];
+  l2_ww   [label="PRESENT\nlib.py + engine_runner", fillcolor="#d5e8d4", color="#82b366"];
+  l2_rw   [label="PARTIAL\nweave / weave_multi / replay /\nmaterialize importable;\nask() / init() trapped in cli.py;\n__init__ exports only __version__", fillcolor="#fff2cc", color="#d6b656"];
+
+  // ---------------- L3 ----------------
+  l3_desc [label="L3 — Amplifier tool modules\n(commands as agent-callable tools)", fillcolor="#f5f5f5", color="#999999"];
+  l3_ww   [label="PRESENT\nbundle.md + modules/\ntool-wiki-weaver (4 tools)", fillcolor="#d5e8d4", color="#82b366"];
+  l3_rw   [label="ABSENT\nno bundle.md / modules", fillcolor="#f8cecc", color="#b85450"];
+
+  // ---------------- L4 ----------------
+  l4_desc [label="L4 — Thin CLI", fillcolor="#f5f5f5", color="#999999"];
+  l4_ww   [label="PRESENT", fillcolor="#d5e8d4", color="#82b366"];
+  l4_rw   [label="PRESENT", fillcolor="#d5e8d4", color="#82b366"];
+
+  // ---------------- note row ----------------
+  note [label="DRY core lives in the .dot files (wiki-weaver).\nrepo-weaver's core is deterministic Python (git → docs),\na weaker fit for .dot pipelines.", shape=note, fillcolor="#fffbe6", color="#d6b656", fontsize=11];
+
+  // ---------------- row alignment (rank=same) ----------------
+  { rank=same; h_level; h_ww; h_rw }
+  { rank=same; l1_desc; l1_ww; l1_rw }
+  { rank=same; l2_desc; l2_ww; l2_rw }
+  { rank=same; l3_desc; l3_ww; l3_rw }
+  { rank=same; l4_desc; l4_ww; l4_rw }
+
+  // ---------------- column ordering (invisible vertical chains) ----------------
+  h_level -> l1_desc -> l2_desc -> l3_desc -> l4_desc -> note;
+  h_ww    -> l1_ww   -> l2_ww   -> l3_ww   -> l4_ww;
+  h_rw    -> l1_rw   -> l2_rw   -> l3_rw   -> l4_rw;
+
+  // ---------------- horizontal ordering within each row ----------------
+  h_level -> h_ww -> h_rw;
+  l1_desc -> l1_ww -> l1_rw;
+  l2_desc -> l2_ww -> l2_rw;
+  l3_desc -> l3_ww -> l3_rw;
+  l4_desc -> l4_ww -> l4_rw;
+
+  // ---------------- legend ----------------
+  subgraph cluster_legend {
+    label="Legend — status color coding";
+    labeljust="l";
+    style=filled; fillcolor="#ffffff"; color="#999999";
+    fontsize=11; fontname="Helvetica-Bold";
+    node [fontsize=9];
+
+    lg_present [label="PRESENT  (green)", fillcolor="#d5e8d4", color="#82b366"];
+    lg_partial [label="PARTIAL  (yellow)", fillcolor="#fff2cc", color="#d6b656"];
+    lg_absent  [label="ABSENT  (red)", fillcolor="#f8cecc", color="#b85450"];
+
+    lg_present -> lg_partial -> lg_absent [style=invis];
+    { rank=same; lg_present; lg_partial; lg_absent }
+  }
+
+  note -> lg_present [style=invis];
+}

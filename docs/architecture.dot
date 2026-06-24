@@ -1,0 +1,97 @@
+digraph repo_weaver_architecture {
+  label="repo-weaver architecture & data flow\ndeterministic git front-end  →  subprocess boundary  →  external LLM engine (wiki-weaver)";
+  labelloc="t";
+  fontname="Helvetica";
+  fontsize=17;
+  rankdir=LR;
+  compound=true;
+  nodesep=0.45;
+  ranksep=1.0;
+  node [fontname="Helvetica", fontsize=10, style=filled, fillcolor="#dae8fc", color="#6c8ebf"];
+  edge [fontname="Helvetica", fontsize=9, color="#555555"];
+
+  // ---------- INPUT store ----------
+  git_repos [label="git repos\n(INPUT)", shape=cylinder, fillcolor="#f5f5f5", color="#999999"];
+
+  // ==================================================================
+  // Cluster A: repo-weaver — deterministic Python, ZERO LLM calls
+  // ==================================================================
+  subgraph cluster_repoweaver {
+    label="repo-weaver   (Python · deterministic · 0 LLM calls)";
+    labeljust="l";
+    style=filled; fillcolor="#eaf2fc"; color="#4a78b5"; penwidth=2;
+    fontsize=13; fontname="Helvetica-Bold";
+
+    cli [label="cli.py\nthin CLI:\ninit / weave / ask /\nreplay / doctor", shape=box];
+    weave [label="lib/weave.py\nweave · weave_multi · replay_windows\n(windowed, incremental/staggered, retry,\nstrand-rescue, dedup, fetch-or-warn)", shape=box];
+    materialize [label="lib/materialize.py\ngit history → source docs\n(change digests, Notable Commits,\nmodule snapshots, owner__repo files)", shape=box];
+    gitio [label="lib/gitio.py\ngit + gh plumbing\n(fetch / fast-forward staleness)", shape=box];
+    schema [label="policy/schema.md\nAUTHORED concept-primary\nsynthesis schema\n(attribution + repo-identity rules)", shape=note, fillcolor="#fff2cc", color="#d6b656"];
+    eval [label="eval/  (NO LLM)\ngrade.py · trace_grounding.py\ncoverage_check.py", shape=box, fillcolor="#d5e8d4", color="#82b366"];
+  }
+
+  // ==================================================================
+  // Cluster B: wiki-weaver — external ENGINE, ALL LLM work
+  // ==================================================================
+  subgraph cluster_wikiweaver {
+    label="wiki-weaver   (external ENGINE · all LLM synthesis)";
+    labeljust="l";
+    style=filled; fillcolor="#f3ecf9"; color="#8a5fb5"; penwidth=2;
+    fontsize=13; fontname="Helvetica-Bold";
+
+    ww_cli [label="wiki-weaver CLI", shape=box, fillcolor="#e1d5e7", color="#9673a6"];
+    ww_lib [label="lib (engine_runner)", shape=box, fillcolor="#e1d5e7", color="#9673a6"];
+    ww_session [label="AmplifierSession +\ncustom 'loop-pipeline'\norchestrator", shape=box, fillcolor="#e1d5e7", color="#9673a6"];
+    ww_dot [label=".dot pipelines\ninit / ingest / ask / lint\n+ synthesize.dot", shape=folder, fillcolor="#e1d5e7", color="#9673a6"];
+  }
+
+  // ---------- OUTPUT / intermediate stores ----------
+  inbox [label="corpus/_inbox/*.md\nmaterialized source docs", shape=cylinder, fillcolor="#ffe6cc", color="#d79b00"];
+  corpus [label="corpus/*.md concept pages\n+ corpus/_archive\n(OUTPUT)", shape=cylinder, fillcolor="#ffe6cc", color="#d79b00"];
+  user [label="user", shape=ellipse, fillcolor="#d5e8d4", color="#82b366"];
+
+  // ================= in-process Python edges (solid) =================
+  git_repos -> gitio [label="git / gh\n(fetch, ff)"];
+  gitio -> materialize [label="commit history"];
+  materialize -> inbox [label="writes source docs"];
+  cli -> weave [label="weave"];
+  cli -> materialize [label="weave", style=dotted];
+  schema -> ww_cli [label="schema (policy)\nfeeds engine", style=dashed, color="#d6b656", fontcolor="#b8860b", constraint=false];
+  inbox -> ww_cli [label="reads _inbox", style=dashed, color="#d79b00", fontcolor="#b06a00"];
+  corpus -> eval [label="deterministic grading\n(reads corpus, no LLM)", style=dotted, color="#82b366", fontcolor="#5a8a3a", constraint=false];
+
+  // engine internals
+  ww_cli -> ww_lib [color="#9673a6"];
+  ww_lib -> ww_session [color="#9673a6"];
+  ww_session -> ww_dot [color="#9673a6"];
+  ww_dot -> corpus [label="loop-pipeline runs synthesize.dot →\nwrites concept pages + _archive", color="#9673a6", fontcolor="#6a4a86"];
+
+  // ================= SUBPROCESS BOUNDARY edges (bold red) =================
+  weave -> ww_cli [label="  subprocess:\n  wiki-weaver ingest  ", style=bold, penwidth=2.6, color="#b85450", fontcolor="#a02020", lhead=cluster_wikiweaver];
+  cli -> ww_cli [label="  subprocess:\n  wiki-weaver ask  ", style=bold, penwidth=2.6, color="#b85450", fontcolor="#a02020", lhead=cluster_wikiweaver];
+  ww_cli -> user [label="cited answer", style=bold, penwidth=2.0, color="#b85450", fontcolor="#a02020"];
+
+  // ============================ LEGEND ============================
+  subgraph cluster_legend {
+    label="Legend";
+    labeljust="l";
+    style=filled; fillcolor="#ffffff"; color="#999999";
+    fontsize=12; fontname="Helvetica-Bold";
+    node [shape=box, fontsize=9];
+
+    lg_proc [label="repo-weaver component\n(deterministic Python)", fillcolor="#dae8fc", color="#6c8ebf"];
+    lg_eng  [label="wiki-weaver component\n(external LLM engine)", fillcolor="#e1d5e7", color="#9673a6"];
+    lg_store [label="data store", shape=cylinder, fillcolor="#ffe6cc", color="#d79b00"];
+    lg_e1 [label="solid = in-process Python call", shape=plaintext, fillcolor="#ffffff"];
+    lg_e2 [label="bold red = subprocess call to external engine", shape=plaintext, fillcolor="#ffffff", fontcolor="#a02020"];
+    lg_e3 [label="dashed = file feed (schema / _inbox)", shape=plaintext, fillcolor="#ffffff"];
+    lg_note [label="repo-weaver writes the SCHEMA (policy);\nwiki-weaver provides the ENGINE (mechanism).\nrepo-weaver makes 0 LLM calls — all synthesis\nhappens across the subprocess boundary.", shape=note, fillcolor="#fffbe6", color="#d6b656"];
+
+    lg_proc -> lg_eng [style=invis];
+    lg_eng -> lg_store [style=invis];
+    lg_store -> lg_e1 [style=invis];
+    lg_e1 -> lg_e2 [style=invis];
+    lg_e2 -> lg_e3 [style=invis];
+    lg_e3 -> lg_note [style=invis];
+  }
+}
