@@ -94,27 +94,35 @@ repo-weaver stays deterministic plumbing + an authored schema. Benefits:
 ## 6. Portability — the four leverage levels
 
 wiki-weaver offers four leverage levels: standalone `.dot` files, a Python library,
-Amplifier tool modules, and a thin CLI. repo-weaver's current state:
+Amplifier tool modules, and a thin CLI. **All four are now built and proven for
+repo-weaver:**
 
-| Level | Form | Status |
-|---|---|---|
-| **L4** | Thin CLI | ✅ |
-| **L2** | Python library | ◐ partial — `weave()` / `weave_multi()` / `replay_windows()` / `materialize()` are importable, but `__init__.py` exports only `__version__`, and `ask()` / `init()` logic still lives in `cli.py` |
-| **L1** | Standalone `.dot` files | ✗ — repo-weaver drives wiki-weaver's `.dot` via subprocess |
-| **L3** | Amplifier tool modules | ✅ — `bundle.md` + `modules/tool-repo-weaver` (3 tools: `repo_weaver_init`, `repo_weaver_weave`, `repo_weaver_ask`) |
+| Level | Form | Status | Proof |
+|---|---|---|---|
+| **L1** | Standalone `.dot` files | ✅ | Proven end-to-end in the Amplifier Resolve **dot-graph resolver (DTU worker)**: `pipelines/repo-weaver-smoke.dot` + `repo-weaver-smoke.resolver.yaml` ran `start→doctor→weave→ask→done` to `completed`, producing a real wiki-weaver corpus + a real cited answer. Nodes **shell out to the repo-weaver CLI**; wiki-weaver stays behind its CLI/subprocess boundary (no engine fold — low coupling). |
+| **L2** | Python library | ✅ | `repo_weaver/__init__.py` exports the clean public API: `init`, `weave`, `weave_multi`, `replay_windows`, `ask`, `materialize`. |
+| **L3** | Amplifier tool modules | ✅ | `bundle.md` + `modules/tool-repo-weaver/` expose 3 agent-callable tools (`repo_weaver_init` / `repo_weaver_weave` / `repo_weaver_ask`); `mount()` is Iron-Law compliant; `execute()` proven to return a real `ToolResult` with a real cited answer. |
+| **L4** | Thin CLI | ✅ | Ran across 30 repos this session. |
 
 ![Leverage levels](docs/leverage-levels.png)
 
-### Roadmap
+The 0-LLM stance and the subprocess boundary hold at **every** level: even the L1
+`.dot` nodes and the L3 tools are deterministic plumbing that shell out to the
+repo-weaver CLI, which in turn shells out to the wiki-weaver engine. No level
+imports or folds wiki-weaver's private engine.
 
-1. ~~**(highest value)** Add `bundle.md` + `modules/tool-repo-weaver` to expose commands
-   as agent-callable tools.~~ **Done** — `bundle.md` + `behaviors/repo-weaver.yaml` +
-   `modules/tool-repo-weaver/` ship three tools: `repo_weaver_init`, `repo_weaver_weave`,
-   `repo_weaver_ask`.
-2. Finish the lib surface — curate `__init__.py`, extract `ask()` / `init()` out of `cli.py`.
-3. `.dot` pipelines are a **weaker fit**: repo-weaver's core is deterministic git plumbing,
-   not LLM logic (which is what `.dot` attractor pipelines are for). Pursue only when an
-   attractor-harness consumer (e.g. Amplifier Resolve's dot-graph resolver) is concretely needed.
+### Roadmap — the four levels are complete
+
+The portability work is **done**. The only remaining surfaces are deliberately
+**parked** as future leverage levels — not built, because there is no consumer yet:
+
+- **MCP / REST service wrappers** — PARKED. Add when a real consumer needs
+  repo-weaver over a network boundary rather than a subprocess one.
+- **Self-hosted web UIs** — PARKED. Add when an interactive product surface is
+  concretely wanted (today the CLI `ask` + the L3 tools cover every known need).
+
+Rule: add a level when a consumer for it is real, not speculatively. Building
+either now would be a service/UI with zero callers — dead complexity.
 
 ## 7. The five fixes shipped (2026-06-23/24)
 

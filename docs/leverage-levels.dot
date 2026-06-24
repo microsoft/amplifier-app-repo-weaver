@@ -17,12 +17,12 @@ digraph leverage_levels {
   // ---------------- L1 ----------------
   l1_desc [label="L1 — Standalone .dot files\n(per-command + shared subgraph)", shape=folder, fillcolor="#f5f5f5", color="#999999"];
   l1_ww   [label="PRESENT\ninit / ingest / ask / lint.dot\n+ synthesize.dot", shape=folder, fillcolor="#d5e8d4", color="#82b366"];
-  l1_rw   [label="ABSENT\ndrives wiki-weaver's .dot\nvia subprocess", fillcolor="#f8cecc", color="#b85450"];
+  l1_rw   [label="PRESENT\nrepo-weaver-smoke.dot\nproven E2E in Resolve\ndot-graph resolver (DTU)", fillcolor="#d5e8d4", color="#82b366"];
 
   // ---------------- L2 ----------------
   l2_desc [label="L2 — Python lib\n(methods per command; AmplifierSession\n+ custom orchestrator runs the .dot files)", fillcolor="#f5f5f5", color="#999999"];
   l2_ww   [label="PRESENT\nlib.py + engine_runner", fillcolor="#d5e8d4", color="#82b366"];
-  l2_rw   [label="PARTIAL\nweave / weave_multi / replay /\nmaterialize importable;\nask() / init() trapped in cli.py;\n__init__ exports only __version__", fillcolor="#fff2cc", color="#d6b656"];
+  l2_rw   [label="PRESENT\n__init__ exports public API:\ninit / weave / weave_multi /\nreplay_windows / ask / materialize", fillcolor="#d5e8d4", color="#82b366"];
 
   // ---------------- L3 ----------------
   l3_desc [label="L3 — Amplifier tool modules\n(commands as agent-callable tools)", fillcolor="#f5f5f5", color="#999999"];
