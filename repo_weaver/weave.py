@@ -787,6 +787,18 @@ def weave_multi(
     for idx, repo in enumerate(repos, 1):
         repo_qualifier = Path(repo).name  # e.g. "amplifier-app-team-pulse"
 
+        # Compute the org-scoped file qualifier that materialize() will use for
+        # filenames.  This must match the internal logic in mat.materialize() so
+        # the archive-skip check below compares against the actual on-disk name.
+        # When the owner is known: "owner__repo" (double-underscore, no slash).
+        # When there is no remote: basename fallback — never fabricate an owner.
+        _origin = gitio.get_origin_url(repo)
+        _owner_repo = gitio.parse_owner_repo(_origin) if _origin else None
+        if _owner_repo is not None:
+            file_qualifier = f"{_owner_repo[0]}__{_owner_repo[1]}"
+        else:
+            file_qualifier = repo_qualifier
+
         # Per-repo since resolution (needed before the archive-skip check).
         if since is not None:
             effective_since = since
@@ -802,7 +814,7 @@ def weave_multi(
         # for this window, there is no point materialising and re-ingesting it
         # (wiki-weaver would dedup-skip it anyway).  Skip loudly so the user
         # can see what was spared on a resumed run.
-        changes_filename = f"{repo_qualifier}-{effective_until}-changes.md"
+        changes_filename = f"{file_qualifier}-{effective_until}-changes.md"
         if archive_dir.exists() and (archive_dir / changes_filename).exists():
             print(
                 f"[repo {idx}/{total}] {repo_qualifier} \u2014 "

@@ -3,17 +3,23 @@
 Produces a small, high-signal set per window:
 
 1. ONE ``<until>-changes.md`` — merged PRs + commit-volume digest.
-   When ``repo_qualifier`` is set (multi-repo mode): ``<repo>-<until>-changes.md``.
+   When ``repo_qualifier`` is set (multi-repo mode) and the owner is known:
+   ``<owner>__<repo>-<until>-changes.md`` (double-underscore org-scoped form).
+   When the owner is unknown (no remote): ``<basename>-<until>-changes.md``.
 2. UP TO ``max_modules`` ``module-<slug>-<until>.md`` files — snapshots of the
    top-level code directories most changed in the window.
-   When ``repo_qualifier`` is set: ``module-<repo>-<slug>-<until>.md``.
+   When ``repo_qualifier`` is set and owner is known:
+   ``module-<owner>__<repo>-<slug>-<until>.md``.
 
 **Single-repo** (``repo_qualifier=None``): filenames are unqualified — identical
 to the historic behaviour, so existing ingested corpora are unaffected.
 
-**Multi-repo** (``repo_qualifier`` provided): every filename and doc body carry
-the repo identifier so wiki-weaver keeps pages from different repos distinct and
-citations always point back to the right source.
+**Multi-repo** (``repo_qualifier`` provided): every filename uses the org-scoped
+``owner__repo`` form (when the remote is available) so two repos with the same
+basename but different orgs — e.g. ``bkrabach/amplifier-bundle-skills`` and
+``microsoft/amplifier-bundle-skills`` — never collide.  Document bodies carry
+the human-readable ``owner/repo`` form so the synthesiser puts the org-qualified
+name into ``repos:`` frontmatter.
 
 Never fabricates provenance.  All data comes from git plumbing or the gh CLI.
 """
@@ -478,12 +484,26 @@ def materialize(
         until:          Window end date YYYY-MM-DD (inclusive, up to 23:59:59).
         max_prs:        Maximum merged PRs to include in the change digest.
         max_modules:    Maximum module snapshot documents to emit.
-        repo_qualifier: When non-None (multi-repo mode) this short label is
-                        injected into every filename and document body so that
-                        sources from different repos never collide and citations
-                        always trace back to the correct repo.  Typically the
+        repo_qualifier: When non-None (multi-repo mode) this label is injected
+                        into every filename and document body so that sources
+                        from different repos never collide and citations always
+                        trace back to the correct repo.  Typically the
                         repository's directory base-name (e.g.
                         ``"amplifier-app-team-pulse"``).
+
+                        **Filename form (org-scoped):** When the remote URL is
+                        available the qualifier is upgraded to
+                        ``"<owner>__<repo>"`` (double-underscore separator,
+                        no slash) so repos with the same basename but different
+                        owners (e.g. forks) produce distinct filenames.  When
+                        no remote is configured the passed-in value (typically
+                        the directory basename) is used as-is — no owner is
+                        fabricated.
+
+                        **Body form:** Document bodies always show the
+                        human-readable ``owner/repo`` when the remote is known,
+                        or the qualifier string when it is not.
+
                         When None (single-repo mode) filenames are unqualified
                         — identical to historic behaviour.
 
@@ -496,13 +516,28 @@ def materialize(
     if origin_url:
         owner_repo = gitio.parse_owner_repo(origin_url)
 
+    # Compute the filesystem-safe qualifier used for filenames.
+    # When the owner is known (remote exists): "{owner}__{repo}" — distinct for
+    # every (owner, repo) pair even when repo basenames collide across orgs.
+    # When the owner is unknown (no remote): fall back to the caller-supplied
+    # qualifier (typically the directory basename) — never fabricate an owner.
+    file_qualifier: Optional[str] = None
+    if repo_qualifier is not None:
+        if owner_repo is not None:
+            file_qualifier = f"{owner_repo[0]}__{owner_repo[1]}"
+        else:
+            # No remote: keep the supplied qualifier as-is (basename fallback).
+            file_qualifier = repo_qualifier
+
     until_rev = gitio.get_window_rev(repo, until)
     commits = gitio.get_commits_name_only(repo, since, until)
 
     docs: list[tuple[str, str]] = []
 
     # 1. Change digest
-    # Filename: "<repo>-<until>-changes.md" (multi) or "<until>-changes.md" (single)
+    # Filename: "<owner>__<repo>-<until>-changes.md" (multi, remote known)
+    #         | "<basename>-<until>-changes.md"       (multi, no remote)
+    #         | "<until>-changes.md"                  (single-repo)
     digest_content = _build_change_digest(
         repo,
         since,
@@ -515,16 +550,26 @@ def materialize(
         classify=classify,
     )
     digest_filename = (
-        f"{repo_qualifier}-{until}-changes.md"
-        if repo_qualifier
+        f"{file_qualifier}-{until}-changes.md"
+        if file_qualifier
         else f"{until}-changes.md"
     )
     docs.append((digest_filename, digest_content))
 
     # 2. Module snapshots
-    # Filenames: "module-<repo>-<slug>-<until>.md" (multi) or "module-<slug>-<until>.md" (single)
+    # Filenames: "module-<owner>__<repo>-<slug>-<until>.md" (multi, remote known)
+    #          | "module-<basename>-<slug>-<until>.md"       (multi, no remote)
+    #          | "module-<slug>-<until>.md"                  (single-repo)
     module_docs = _build_module_snapshots(
-        repo, since, until, until_rev, commits, owner_repo, max_modules, repo_qualifier
+        repo,
+        since,
+        until,
+        until_rev,
+        commits,
+        owner_repo,
+        max_modules,
+        repo_qualifier,
+        file_qualifier=file_qualifier,
     )
     docs.extend(module_docs)
 
@@ -593,13 +638,17 @@ def _build_change_digest(
     parts: list[str] = []
     parts.append(f"# Changes: {since} \u2192 {until}\n\n")
     # Label the repo so the synthesizer can always derive `repos:` frontmatter.
-    # Multi-repo mode: use the explicit qualifier supplied by the caller.
-    # Single-repo mode: fall back to the repo name from the GitHub remote URL.
-    # No-remote mode: omit the label (cannot fabricate a name we don't have).
-    if repo_qualifier:
+    # When owner_repo is available: use "owner/repo" for maximum disambiguation —
+    # this is the human-readable identity that flows into `repos:` frontmatter
+    # and distinguishes same-basename repos across orgs (e.g. bkrabach/amplifier-bundle-skills
+    # vs microsoft/amplifier-bundle-skills).
+    # Multi-repo mode with no remote: fall back to the supplied qualifier (basename).
+    # No-remote single-repo: omit — cannot fabricate a name we don't have.
+    if owner_repo:
+        _owner, _repo_name = owner_repo
+        parts.append(f"**Repository:** `{_owner}/{_repo_name}`\n\n")
+    elif repo_qualifier:
         parts.append(f"**Repository:** `{repo_qualifier}`\n\n")
-    elif owner_repo:
-        parts.append(f"**Repository:** `{owner_repo[1]}`\n\n")
 
     # Fetch generously so the window is fully covered even when many newer PRs
     # exist beyond it.  Routine PRs are free (collapsed), so we never need to
@@ -804,6 +853,7 @@ def _build_module_snapshots(
     owner_repo: Optional[tuple[str, str]],
     max_modules: int,
     repo_qualifier: Optional[str] = None,
+    file_qualifier: Optional[str] = None,
 ) -> list[tuple[str, str]]:
     ranked = _rank_modules(commits)[:max_modules]
     results: list[tuple[str, str]] = []
@@ -820,10 +870,15 @@ def _build_module_snapshots(
             repo_qualifier,
         )
         if content:
-            # Multi-repo: "module-<repo>-<slug>-<until>.md"  (non-colliding)
-            # Single-repo: "module-<slug>-<until>.md"         (historic, unchanged)
-            if repo_qualifier:
-                filename = f"module-{repo_qualifier}-{_slug(module_path)}-{until}.md"
+            # file_qualifier is the org-scoped form (e.g. "owner__repo") when the
+            # remote URL is available, or the basename fallback when it is not.
+            # Multi-repo: "module-<owner>__<repo>-<slug>-<until>.md" (non-colliding)
+            # Single-repo: "module-<slug>-<until>.md"                 (historic, unchanged)
+            fname_prefix = (
+                file_qualifier if file_qualifier is not None else repo_qualifier
+            )
+            if fname_prefix:
+                filename = f"module-{fname_prefix}-{_slug(module_path)}-{until}.md"
             else:
                 filename = f"module-{_slug(module_path)}-{until}.md"
             results.append((filename, content))
@@ -886,15 +941,25 @@ def _build_module_doc(
     """
     parts: list[str] = []
     if repo_qualifier:
-        # Disambiguate: "frontend (amplifier-app-team-pulse)" vs "frontend (amplifier-bundle-wiki-weaver)"
-        parts.append(f"# Module: {module_path} ({repo_qualifier})\n\n")
-        parts.append(f"**Repository:** `{repo_qualifier}`\n\n")
+        # Multi-repo mode: use "owner/repo" for human-readable identity when the
+        # remote is available — this disambiguates forks / same-basename repos.
+        # Falls back to the supplied qualifier (basename) when there is no remote.
+        if owner_repo:
+            _owner, _repo_name = owner_repo
+            body_identity = f"{_owner}/{_repo_name}"
+        else:
+            body_identity = repo_qualifier
+        # Title: "frontend (bkrabach/amplifier-bundle-skills)" — org-qualified, unambiguous.
+        parts.append(f"# Module: {module_path} ({body_identity})\n\n")
+        parts.append(f"**Repository:** `{body_identity}`\n\n")
     else:
         parts.append(f"# Module: {module_path}\n\n")
         # Single-repo mode: label the repo from the GitHub remote URL when available
-        # so the synthesizer can always derive `repos:` frontmatter without resolving citations.
+        # so the synthesizer can always derive `repos:` frontmatter.
+        # Use "owner/repo" for maximum disambiguation (same logic as change digest).
         if owner_repo:
-            parts.append(f"**Repository:** `{owner_repo[1]}`\n\n")
+            _owner, _repo_name = owner_repo
+            parts.append(f"**Repository:** `{_owner}/{_repo_name}`\n\n")
 
     # ---- Purpose ----
     purpose: Optional[str] = None
