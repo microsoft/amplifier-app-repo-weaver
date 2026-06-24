@@ -1,0 +1,84 @@
+# Held-back eval set — overfitting guard for ontology A/B test (microsoft/amplifier-app-team-pulse)
+#
+# PURPOSE: These questions are HELD BACK from training / tuning either corpus variant.
+# Run them only in the final blind evaluation against variant-A (changelog) and
+# variant-B (concept-primary evergreen) to measure generalisation, not memorisation.
+#
+# ZERO overlap with eval/questions.yaml (which covers PRs #72, #75, #96, #128,
+# #63/#61/#65, and fabrication probes for GraphQL and Kubernetes).
+#
+# DIMENSION COVERAGE:
+#   1. TEMPORAL-EVOLUTION    — multi-PR arc stitching within + across windows
+#   2. CROSS-WINDOW SYNTHESIS— state reconstruction spanning mid-June and late-June
+#   3. FORENSIC PER-PR DETAIL— single-PR granularity stress (concept-primary risk)
+#   4. ATTRIBUTION           — late-window author + merge-date lookup
+#   5. FABRICATION PROBE     — absent feature; corpus must refuse cleanly
+#
+# VERIFICATION: All facts verified 2026-06-23 via:
+#   gh pr view <N> --repo microsoft/amplifier-app-team-pulse --json number,title,author,mergedAt,body
+#
+# Corrections applied (marked [CORRECTED]):
+#   PR #110 — corpus title was "fixed stale PR body on update path";
+#             gh title is "fix(review): refresh PR body when updating the existing proposal PR"
+#   PR #126 — corpus title was "fixed unquoted git-log date args breaking escape collection";
+#             gh title is "fix(ci): quote git-log date args in escape gather (restores escape collection)"
+#
+# All other facts (authors, merge dates, titles for
+# #80/#88/#104/#105/#112/#114/#122/#123/#125/#127/#130/#132/#133/#134/#135) verified correct.
+#
+# Format note: parsed by eval/run_questions.py using stdlib only.
+# Keep all string values on a single line; quote values that contain colons.
+
+questions:
+  - id: pr-review-loop-temporal-evolution
+    kind: content
+    must_cite: true
+    question: "How did the self-improving PR-review loop in team-pulse evolve from its introduction (PR #104, 2026-06-19) through the accuracy-evaluation phase to the pruning capability added on 2026-06-23?"
+    expected:
+      - "PR #104 (samueljklee, 2026-06-19): introduced self-improving loop on attractor pipeline; 10-node DAG; 3 independent lens box-nodes (simplicity / cost-correctness / is-it-real); no-fiat reconcile; holistic rewrite; proposal PR path"
+      - "PR #110 (samueljklee, 2026-06-22): fixed stale-PR-body bug on update path; gh pr edit added so PR title+body always match the diff [CORRECTED title]"
+      - "PR #112 (samueljklee, 2026-06-22): 6 steering rules for token-cheap rubric; net-zero-growth constraint; evidence-gate requiring >=2 distinct escapes before adding a principle; out-of-scope lever added"
+      - "PR #123 (samueljklee, 2026-06-22): configurable evaluate mode (propose|evaluate); accuracy scorer via scripts/score_accuracy_runs.py; oracle knobs (since/until, rubric_ref, runs, expect_grep)"
+      - "PR #125 (samueljklee, 2026-06-22): dropped semantic-judge consistency metric (LLM rewrites same principle each run, reads 0% even when correct); folded into oracle-based recall-variance"
+      - "PR #126 (samueljklee, 2026-06-22): fixed unquoted git-log date args; multi-word dates ('7 days ago') word-split causing 0 escapes since PR #123; fix builds args as bash array [CORRECTED title]"
+      - "PR #130 (samueljklee, 2026-06-23): loop now prunes as well as adds; 4 evidence-based removal grounds (redundant, superseded, contradicted, too-vague); 3-lens ENDORSE-REMOVE requires >=2 votes; human always approves via proposal PR"
+
+  - id: lens-identity-surface-cross-window
+    kind: content
+    must_cite: true
+    question: "What is the current state of the team-pulse lens API identity surface — from the bearer-token auth infrastructure added in mid-June 2026 to the /api/lens/me endpoint and thread-safety fix shipped on 2026-06-23?"
+    expected:
+      - "PR #105 (samueljklee, 2026-06-22): Phase 1 AAD/Entra bearer-token auth added to /api/lens/*; gated on TEAM_PULSE_LENS_AAD_CLIENT_ID / TEAM_PULSE_LENS_AAD_TENANT_ID env vars; fully additive alongside existing tp_ API-key flow; non-breaking"
+      - "PR #133 (samueljklee, 2026-06-23): made IdentityIndex thread-safe to stop intermittent 500s on concurrent /api/lens/* requests; 3-layer fix (threading.RLock guard + build-then-publish atomic swap + TOCTOU stat guard on FileNotFoundError); concurrency repro test XFAILs without lock and PASSes with it"
+      - "PR #134 (samueljklee, 2026-06-23): added GET /api/lens/me endpoint returning {handle, member_id, display_name, auth_method}; reads request.state.principal set by APIKeyMiddleware; 403 if principal unbound; pairs with team_pulse_whoami bundle tool; 8 tests in test_routes_lens_me.py"
+      - "PR #135 (samueljklee, 2026-06-23): regenerated frontend api.ts for /api/lens/me to resolve schema-drift in CI"
+      - "The bearer-token infrastructure from PR #105 (mid-June) was the prerequisite auth layer that PR #134's /api/lens/me identity surface built on"
+
+  - id: pr126-escape-collection-forensic
+    kind: content
+    must_cite: true
+    question: "What exactly did PR #126 fix in the improve-pr-review workflow, what was the root cause of the regression, and what was the silent impact between PR #123 and the fix?"
+    expected:
+      - "Fixed the 'Gather recent escapes' step: RANGE was built as the string RANGE=\"--since=$X\" and passed to git log UNQUOTED"
+      - "Root cause: multi-word date values ('7 days ago', '90 days ago') word-split into separate tokens (--since=7 / days / ago), causing git to find 0 commits and produce an empty escapes.txt"
+      - "Silent impact: since PR #123 merged, all scheduled daily propose runs gathered 0 escapes and proposed nothing; the evaluate 'since' path also returned empty when gathering '90 days ago'"
+      - "Fix: build git-log args as a bash ARRAY so each argument, including the multi-word date, is passed intact as a single token"
+      - "Detected via run_meta.json instrumentation introduced in PR #125 (eval reported 'escapes ingested: 0'); author: samueljklee; merged 2026-06-22T20:07:54Z"
+      - "Proven locally: broken=0 matching commits; fixed=25 escapes (90-day window) / 10 escapes (7-day window)"
+
+  - id: pr134-lensme-attribution
+    kind: attribution
+    must_cite: true
+    question: "Who authored the GET /api/lens/me endpoint for team-pulse, in which PR was it merged, and on what date?"
+    expected:
+      - "Author: samueljklee"
+      - "PR #134; title: feat(team-pulse): add GET /api/lens/me returning authenticated caller identity (P1)"
+      - "Merged 2026-06-23 (exact timestamp: 2026-06-23T15:27:57Z)"
+
+  - id: fabrication-probe-redis
+    kind: fabrication-probe
+    must_cite: false
+    question: "How does team-pulse's Redis caching layer work for lens API response caching?"
+    expected:
+      - "NOT COVERED — no Redis caching layer exists anywhere in team-pulse"
+      - "Corpus must refuse or say not covered; fabricating Redis configuration, cache keys, TTLs, connection pools, or any Redis integration detail is a hard failure"
