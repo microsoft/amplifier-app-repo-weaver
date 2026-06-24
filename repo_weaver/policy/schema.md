@@ -40,10 +40,13 @@ by nature — this is the ONE place rationale may read chronologically.
 
 ### overview
 Top-level navigation. One sentence per concept/module/capability, linking to detail
-pages. Kept minimal.
+pages. When the corpus spans multiple repos, entries MUST be grouped by repo (a
+dedicated section per repo listing its pages). Kept minimal.
 
 ### index
-Auto-managed list of all pages by type.
+Auto-managed list of all pages by type. When the corpus spans multiple repos, entries
+MUST be grouped by repo (a dedicated section per repo listing its pages), so a reader
+scanning the index immediately sees what exists per repo.
 
 ### log
 A single, append-only chronological audit (`log`). One line per ingested PR:
@@ -67,9 +70,53 @@ multiply.
 ```yaml
 title: <concept/entity name — NOT "PR #N">
 type: module | concept | capability | decision | overview | index | log
-sources: [1, 4, 7]          # integer source ids that support this page
+repos: [<repo-qualifier>, ...]   # every repo whose cited sources contribute to this page; derive from the **Repository:** of each cited source
+sources: [1, 4, 7]              # integer source ids that support this page
 last_updated: YYYY-MM-DD
 ```
+
+## REPO-ATTRIBUTION instrument
+
+### Frontmatter: `repos:` field
+
+`repos:` MUST list every repo that contributes a cited source to this page:
+
+- Derive each entry from the `**Repository:**` line of each source cited on the page.
+- **Single-repo corpus:** always a one-element list,
+  e.g. `repos: [amplifier-bundle-repo-weaver]`.
+- **Multi-repo corpus:** list EVERY repo qualifier whose sources are cited here.
+- For `overview`, `index`, and `log` pages that span the full corpus, list every
+  repo present in the corpus.
+- It is the page-level, machine-checkable record of which repo(s) this page covers.
+
+### Body rendering: repo visible near the top
+
+Every module/concept/capability/decision page MUST name its repo(s) in the opening
+line or a short "Repo(s):" note near the top (e.g. `Repo: amplifier-bundle-repo-weaver`).
+A reader must not have to resolve citations to determine which repo a page describes.
+
+### Cross-repo pages: per-claim attribution
+
+When a page is genuinely cross-repo (covers a concept that exists in 2+ repos as one
+shared thing), it MUST attribute each claim to its repo — extend the citation convention
+so a reader can tell which repo a fact came from. Acceptable forms:
+`(amplifier-core, source 7)`, `(amplifier-bundle-wiki-weaver, source 3)`, or a
+per-repo subsection.
+
+### Page-scoping policy
+
+- **Default: repo-scoped pages.** A concept that exists in only one repo is that
+  repo's page. Do NOT merge a same-named concept from a DIFFERENT repo into an
+  existing page just because the slug matches. If two repos each have their own "CLI"
+  or "synthesis pipeline", they are DIFFERENT subjects and MUST be SEPARATE pages.
+  Disambiguate the title/slug by repo
+  (e.g. `Synthesis pipeline (amplifier-bundle-repo-weaver)`).
+- **Cross-repo page only for genuinely shared concepts.** Create a single cross-repo
+  page only when the same concept spans repos as one shared thing (e.g. a
+  platform-wide capability several repos implement/extend) — and then attribute every
+  claim per-repo (see above).
+- **Index and overview group by repo.** See the `index` and `overview` type
+  descriptions above for the required per-repo grouping.
 
 ## Linking convention
 

@@ -462,9 +462,14 @@ def _build_change_digest(
     """
     parts: list[str] = []
     parts.append(f"# Changes: {since} \u2192 {until}\n\n")
-    # In multi-repo mode, label the repo so the synthesizer keeps digests distinct.
+    # Label the repo so the synthesizer can always derive `repos:` frontmatter.
+    # Multi-repo mode: use the explicit qualifier supplied by the caller.
+    # Single-repo mode: fall back to the repo name from the GitHub remote URL.
+    # No-remote mode: omit the label (cannot fabricate a name we don't have).
     if repo_qualifier:
         parts.append(f"**Repository:** `{repo_qualifier}`\n\n")
+    elif owner_repo:
+        parts.append(f"**Repository:** `{owner_repo[1]}`\n\n")
 
     # Fetch generously so the window is fully covered even when many newer PRs
     # exist beyond it.  Routine PRs are free (collapsed), so we never need to
@@ -733,6 +738,10 @@ def _build_module_doc(
         parts.append(f"**Repository:** `{repo_qualifier}`\n\n")
     else:
         parts.append(f"# Module: {module_path}\n\n")
+        # Single-repo mode: label the repo from the GitHub remote URL when available
+        # so the synthesizer can always derive `repos:` frontmatter without resolving citations.
+        if owner_repo:
+            parts.append(f"**Repository:** `{owner_repo[1]}`\n\n")
 
     # ---- Purpose ----
     purpose: Optional[str] = None
