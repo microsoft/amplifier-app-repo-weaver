@@ -83,7 +83,7 @@ last_updated: YYYY-MM-DD
 
 - Derive each entry from the `**Repository:**` line of each source cited on the page.
 - **Single-repo corpus:** always a one-element list,
-  e.g. `repos: [amplifier-bundle-repo-weaver]`.
+  e.g. `repos: [amplifier-app-repo-weaver]`.
 - **Multi-repo corpus:** list EVERY repo qualifier whose sources are cited here.
 - For `overview`, `index`, and `log` pages that span the full corpus, list every
   repo present in the corpus.
@@ -92,7 +92,7 @@ last_updated: YYYY-MM-DD
 ### Body rendering: repo visible near the top
 
 Every module/concept/capability/decision page MUST name its repo(s) in the opening
-line or a short "Repo(s):" note near the top (e.g. `Repo: amplifier-bundle-repo-weaver`).
+line or a short "Repo(s):" note near the top (e.g. `Repo: amplifier-app-repo-weaver`).
 A reader must not have to resolve citations to determine which repo a page describes.
 
 ### Cross-repo pages: per-claim attribution
@@ -110,7 +110,7 @@ per-repo subsection.
   existing page just because the slug matches. If two repos each have their own "CLI"
   or "synthesis pipeline", they are DIFFERENT subjects and MUST be SEPARATE pages.
   Disambiguate the title/slug by repo
-  (e.g. `Synthesis pipeline (amplifier-bundle-repo-weaver)`).
+  (e.g. `Synthesis pipeline (amplifier-app-repo-weaver)`).
 - **Cross-repo page only for genuinely shared concepts.** Create a single cross-repo
   page only when the same concept spans repos as one shared thing (e.g. a
   platform-wide capability several repos implement/extend) — and then attribute every

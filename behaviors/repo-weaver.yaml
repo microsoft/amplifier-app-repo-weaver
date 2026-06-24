@@ -9,7 +9,7 @@ bundle:
 # source: is relative to THIS FILE's directory (behaviors/).
 # ../modules/tool-repo-weaver resolves to <repo-root>/modules/tool-repo-weaver.
 # Post-publish form (documented, not active):
-#   source: git+https://github.com/bkrabach/amplifier-bundle-repo-weaver@main#subdirectory=modules/tool-repo-weaver
+#   source: git+https://github.com/microsoft/amplifier-app-repo-weaver@main#subdirectory=modules/tool-repo-weaver
 tools:
   - module: tool-repo-weaver
     source: ../modules/tool-repo-weaver

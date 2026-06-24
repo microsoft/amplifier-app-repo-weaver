@@ -91,7 +91,7 @@ Same materializer, same engine, same schema. Scope is a config, not a fork.
 
 ## Shape of the bundle
 
-`amplifier-bundle-repo-weaver` (name TBD — sibling to wiki-weaver):
+`amplifier-app-repo-weaver` (sibling to wiki-weaver):
 
 - A **tool module** providing: `repo_weaver_materialize` (repos → `_inbox/` md)
   and thin pass-throughs to wiki-weaver's `ingest`/`ask`, OR simply *depend on*
@@ -167,7 +167,7 @@ module named 'pipeline'`. Patched to resolve under both names. Worth a PR back t
 
 ## Post-readiness work (2026-06-23) — published + S1/S2/A-B
 
-Published: **bkrabach/amplifier-bundle-repo-weaver (PRIVATE)**. Commits e12a1bf (prod-readiness), 7718435 (README+eval-repro), fdabf3c (resume + --no-classify), b740f3f (multi_repo.yaml).
+Published: **microsoft/amplifier-app-repo-weaver (PRIVATE)**. Commits e12a1bf (prod-readiness), 7718435 (README+eval-repro), fdabf3c (resume + --no-classify), b740f3f (multi_repo.yaml).
 
 **S1 — resume-from-checkpoint (fdabf3c):** `replay` records completed windows in `<corpus>/.replay-progress.json`; re-run skips completed, resumes at first incomplete; `--restart` forces full; `_failed/` sources re-attempted on resume; `weave_multi` skips already-archived repos. Marks complete ONLY on rc=0 (fail-loud). 32 tests pass.
 
@@ -182,7 +182,7 @@ Published: **bkrabach/amplifier-bundle-repo-weaver (PRIVATE)**. Commits e12a1bf 
 
 ## #1 SHIPPED + RE-PROVEN (2026-06-23) — concept-primary is now the default
 
-Commit `944e1a4` (pushed to bkrabach/amplifier-bundle-repo-weaver), 64 tests:
+Commit `944e1a4` (pushed to microsoft/amplifier-app-repo-weaver), 64 tests:
 - **Concept-primary schema is now repo-weaver's DEFAULT** (`policy/schema.md`): no standalone PR pages;
   module/concept/capability/decision are durable types; History sections accrete in place; chronology
   quarantined to one append-only `log`; titles are concepts. Cite-or-omit, author-attribution, cross-repo
