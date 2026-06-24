@@ -280,6 +280,145 @@ def _classify(
 
 
 # ---------------------------------------------------------------------------
+# Navigation-trailer stripping
+# ---------------------------------------------------------------------------
+
+# Matches the opening line of a "Pages used / Pages consulted / Pages:" block.
+# Supports optional Markdown bold markers (**) around the label.
+# Covered forms (case-insensitive):
+#   "Pages used: ..."        "Pages consulted: ..."    "Pages: ..."
+#   "**Pages used:** ..."    "**Pages consulted:** ..." "**Pages:** ..."
+_TRAILER_HEADER_RE = re.compile(
+    r"^\*{0,2}\s*pages(?:\s+(?:used|consulted))?\s*\*{0,2}\s*:",
+    re.IGNORECASE,
+)
+
+# Captures the content after a "Source:" label so we can inspect it.
+_SOURCE_NAV_RE = re.compile(
+    r"^\*{0,2}\s*source\s*\*{0,2}\s*:\s*(.*)",
+    re.IGNORECASE,
+)
+
+# Trailing ellipsis ("index.md, overview.md, ...")
+_ELLIPSIS_TAIL_RE = re.compile(r"\s*\.\.\.\s*$")
+
+
+def _is_nav_only_source_line(line: str) -> bool:
+    """Return True if *line* is a ``Source:`` citation containing only ``.md`` page names.
+
+    Accepts: ``Source: index.md``, ``Source: [index.md, overview.md]``,
+             ``**Source:** [index.md]``.
+    Rejects: any line whose post-label content includes prose words that do
+    not end in ``.md`` — those are real citations, not navigation metadata.
+    """
+    m = _SOURCE_NAV_RE.match(line.strip())
+    if not m:
+        return False
+    rest = m.group(1).strip().strip("[]").strip()
+    if not rest:
+        return True  # bare "Source:" with nothing following
+    raw = re.split(r"[,\s]+", rest)
+    tokens = [t.strip("[].,") for t in raw if t.strip("[].,")]
+    return bool(tokens) and all(t.endswith(".md") for t in tokens)
+
+
+def _is_page_list_continuation(line: str) -> bool:
+    """Return True if *line* looks like a comma-separated list of ``.md`` page names.
+
+    Used to recognise multi-line continuations of a ``Pages used:`` block::
+
+        Pages used:
+          index.md, overview.md
+          frontend-toolchain.md
+    """
+    stripped = line.strip()
+    if not stripped:
+        return False
+    # Strip a trailing ellipsis (e.g. "index.md, overview.md, ...")
+    stripped = _ELLIPSIS_TAIL_RE.sub("", stripped).strip()
+    if not stripped:
+        return False
+    raw = re.split(r"[,\s]+", stripped)
+    tokens = [t.strip("[].,") for t in raw if t.strip("[].,")]
+    return bool(tokens) and all(t.endswith(".md") for t in tokens)
+
+
+def _strip_navigation_trailer(text: str) -> str:
+    """Strip trailing navigation-metadata lines from an answer.
+
+    Removes lines that form a recognised navigation trailer at the *end* of
+    the answer so they are not analysed for grounding.  The body of the answer
+    is never touched.
+
+    Supported trailer forms (all case-insensitive):
+
+    * ``Pages used: overview.md, index.md``
+    * ``Pages consulted: index.md, overview.md, ...``
+    * ``Pages: index.md``
+    * ``**Pages used:** overview.md, index.md``  (Markdown bold label)
+    * Multi-line block: ``Pages used:\\n  index.md, overview.md``
+    * ``Source: [index.md]``  (pure page-name citation at the end)
+
+    Conservative guarantees:
+
+    * Only lines at the **tail** of the text are inspected.
+    * Scanning stops the moment a non-trailer, non-blank line is encountered.
+    * If the same label appears mid-answer (body prose), it is **not** stripped.
+    * Returns the original text unchanged when no recognised trailer is found.
+    """
+    lines = text.splitlines()
+    if not lines:
+        return text
+
+    # ------------------------------------------------------------------
+    # Pass 1 — locate a Pages: header block at the tail.
+    # Scan backward, accepting: blanks, page-list continuations, Source: nav.
+    # Commit (pages_cutoff) as soon as the Pages: header is confirmed.
+    # ------------------------------------------------------------------
+    pages_cutoff: int | None = None
+    i = len(lines) - 1
+    while i >= 0:
+        stripped = lines[i].strip()
+        if not stripped:
+            i -= 1
+            continue
+        if _TRAILER_HEADER_RE.match(stripped):
+            pages_cutoff = i
+            break  # definitive — stop scanning
+        if _is_nav_only_source_line(stripped) or _is_page_list_continuation(stripped):
+            i -= 1
+            continue
+        break  # body content encountered — stop
+
+    if pages_cutoff is not None:
+        result = "\n".join(lines[:pages_cutoff])
+        return result.rstrip()
+
+    # ------------------------------------------------------------------
+    # Pass 2 — look for a standalone Source: nav line at the tail.
+    # Only strip if ALL non-blank trailing lines are Source: pure-nav.
+    # ------------------------------------------------------------------
+    source_cutoff: int | None = None
+    i = len(lines) - 1
+    while i >= 0:
+        stripped = lines[i].strip()
+        if not stripped:
+            i -= 1
+            continue
+        if _is_nav_only_source_line(stripped):
+            source_cutoff = i
+            i -= 1
+            continue
+        break  # non-source content
+
+    if source_cutoff is not None:
+        result = "\n".join(lines[:source_cutoff])
+        return result.rstrip()
+
+    return text
+
+
+# ---------------------------------------------------------------------------
 # Core trace function
 # ---------------------------------------------------------------------------
 
@@ -321,6 +460,11 @@ def trace(corpus_dir: str, answer_path: str) -> dict:
             f"WARNING: answer field is empty in {ans_path} — no tokens to trace",
             file=sys.stderr,
         )
+
+    # Strip trailing navigation-metadata lines (Pages used:, Pages consulted:,
+    # Source: [.md refs]) before tokenising so wiki-layer filenames are never
+    # analysed as factual claims.  Body prose is never touched.
+    answer_text = _strip_navigation_trailer(answer_text)
 
     source_docs, wiki_pages = _load_corpus_texts(corpus)
     raw_tokens = _extract_tokens(answer_text)
