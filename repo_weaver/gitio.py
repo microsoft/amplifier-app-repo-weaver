@@ -143,7 +143,7 @@ def get_commits_name_only(
         f"--after={since}",
         f"--before={until} 23:59:59",
         "--name-only",
-        "--format=COMMIT:%H\t%s",
+        "--format=COMMIT:%H\t%cs\t%an\t%s",
     ]
     if path:
         cmd += ["--", path]
@@ -160,8 +160,20 @@ def get_commits_name_only(
             if current is not None:
                 commits.append(current)
             rest = line[len("COMMIT:") :]
-            sha, _, subject = rest.partition("\t")
-            current = {"hash": sha.strip(), "subject": subject.strip(), "paths": []}
+            # Format: <sha>\t<date>\t<author>\t<subject>
+            # Use split with maxsplit=3 so subject may contain tabs.
+            fields = rest.split("\t", 3)
+            sha = fields[0].strip() if len(fields) > 0 else ""
+            date = fields[1].strip() if len(fields) > 1 else ""
+            author = fields[2].strip() if len(fields) > 2 else ""
+            subject = fields[3].strip() if len(fields) > 3 else ""
+            current = {
+                "hash": sha,
+                "date": date,
+                "author": author,
+                "subject": subject,
+                "paths": [],
+            }
         elif line.strip() and current is not None:
             cast_current = current
             paths_list = cast_current["paths"]
