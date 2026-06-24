@@ -101,14 +101,16 @@ Amplifier tool modules, and a thin CLI. repo-weaver's current state:
 | **L4** | Thin CLI | ✅ |
 | **L2** | Python library | ◐ partial — `weave()` / `weave_multi()` / `replay_windows()` / `materialize()` are importable, but `__init__.py` exports only `__version__`, and `ask()` / `init()` logic still lives in `cli.py` |
 | **L1** | Standalone `.dot` files | ✗ — repo-weaver drives wiki-weaver's `.dot` via subprocess |
-| **L3** | Amplifier tool modules | ✗ — no `bundle.md` / `modules/` |
+| **L3** | Amplifier tool modules | ✅ — `bundle.md` + `modules/tool-repo-weaver` (3 tools: `repo_weaver_init`, `repo_weaver_weave`, `repo_weaver_ask`) |
 
 ![Leverage levels](docs/leverage-levels.png)
 
 ### Roadmap
 
-1. **(highest value)** Add `bundle.md` + `modules/tool-repo-weaver` to expose commands
-   as agent-callable tools.
+1. ~~**(highest value)** Add `bundle.md` + `modules/tool-repo-weaver` to expose commands
+   as agent-callable tools.~~ **Done** — `bundle.md` + `behaviors/repo-weaver.yaml` +
+   `modules/tool-repo-weaver/` ship three tools: `repo_weaver_init`, `repo_weaver_weave`,
+   `repo_weaver_ask`.
 2. Finish the lib surface — curate `__init__.py`, extract `ask()` / `init()` out of `cli.py`.
 3. `.dot` pipelines are a **weaker fit**: repo-weaver's core is deterministic git plumbing,
    not LLM logic (which is what `.dot` attractor pipelines are for). Pursue only when an

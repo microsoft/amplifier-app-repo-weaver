@@ -1,0 +1,15 @@
+bundle:
+  name: repo-weaver-behavior
+  version: 0.1.0
+  description: >
+    Mounts the repo-weaver tools (repo_weaver_init, repo_weaver_weave,
+    repo_weaver_ask) as agent-callable tools. Compose onto any bundle to
+    add git-repo-to-corpus automation — no separate CLI install needed.
+
+# source: is relative to THIS FILE's directory (behaviors/).
+# ../modules/tool-repo-weaver resolves to <repo-root>/modules/tool-repo-weaver.
+# Post-publish form (documented, not active):
+#   source: git+https://github.com/bkrabach/amplifier-bundle-repo-weaver@main#subdirectory=modules/tool-repo-weaver
+tools:
+  - module: tool-repo-weaver
+    source: ../modules/tool-repo-weaver
