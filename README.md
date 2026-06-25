@@ -13,6 +13,21 @@ mode or config — you point `init` at one repo or several, and the corpus is
 
 ---
 
+## Ways to use repo-weaver — four leverage levels
+
+repo-weaver is consumable **four** ways; the CLI documented here is just one of
+them. All four are built and proven. See [ARCHITECTURE.md](ARCHITECTURE.md#6-portability--the-four-leverage-levels)
+for detail.
+
+| Level | Form | How you use it |
+|-------|------|----------------|
+| **L1** | `.dot` attractor pipelines | Standalone DOT pipelines in `pipelines/` that run under the Amplifier attractor engine / the Resolve dot-graph resolver — each pipeline shells out to the repo-weaver CLI. Proven end-to-end in the Resolve dot-graph resolver. |
+| **L2** | Python library | `import repo_weaver` and call the public API — `init`, `weave`, `weave_multi`, `replay_windows`, `ask`, `materialize` — to embed repo-weaver in another codebase. |
+| **L3** | Amplifier tool modules | `modules/tool-repo-weaver/` exposes agent-callable tools (`repo_weaver_init` / `repo_weaver_weave` / `repo_weaver_ask`) for use inside Amplifier bundles. |
+| **L4** | CLI | The `repo-weaver` commands documented in this README — the rest of the doc covers this level. |
+
+---
+
 ## How it works
 
 - **Materialize git history** — for each time window, repo-weaver emits a per-repo
@@ -41,7 +56,7 @@ partway through on a missing key.
 | **wiki-weaver** on PATH | `uv tool install git+https://github.com/microsoft/amplifier-bundle-wiki-weaver` | The install fix landed in **PR #3 (now merged to main)**, so a fresh install works. |
 | **git** on PATH | system package manager | repo-weaver shells out to `git`; it is never imported. |
 | **gh** authenticated | install from <https://cli.github.com/>, then `gh auth login` | Verify with `gh auth status`. PR data is fetched via `gh`. |
-| **LLM provider key** | `export GOOGLE_API_KEY=<your-key>` | `GOOGLE_API_KEY` is the primary key used by wiki-weaver ingest/ask in this environment. `ANTHROPIC_API_KEY` may be the alternative depending on the wiki-weaver backend. |
+| **At least one LLM provider key** | export any one of `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY`, or `OPENAI_API_KEY` | `doctor` accepts any of the three — it no longer hard-requires a specific provider. Large runs have been done on Anthropic. |
 
 `doctor` also confirms the packaged `policy/schema.md` is present (it ships inside
 the repo-weaver package). All commands except `doctor` refuse to run if
@@ -55,18 +70,24 @@ repo-weaver doctor
 
 ## Install
 
-repo-weaver is an **unpublished local project** — there is no PyPI release. The
-supported, documented path is an editable install from a clone:
+repo-weaver is an **unpublished project** — there is no PyPI release. Install it
+directly from the GitHub repo:
 
 ```bash
-git clone <repo-weaver-url>
-cd repo-weaver
+uv tool install git+https://github.com/microsoft/amplifier-app-repo-weaver
+```
+
+Or, if you want a local checkout to hack on, install editable from a clone:
+
+```bash
+git clone https://github.com/microsoft/amplifier-app-repo-weaver
+cd amplifier-app-repo-weaver
 uv tool install --editable .
 ```
 
-The packaged `policy/schema.md` now ships inside the wheel, so a non-editable
-install (`uv tool install .`) also works — but **editable-from-clone is the
-documented path**. After installing, verify everything:
+The packaged `policy/schema.md` ships inside the wheel, so the non-editable
+install works too — the editable-from-clone path is just for local development.
+After installing, verify everything:
 
 ```bash
 repo-weaver doctor
@@ -175,8 +196,8 @@ window materializes.
 ## Troubleshooting
 
 - **`doctor` reports a failure.** Fix the named row before any long run:
-  - *GOOGLE_API_KEY not set* → `export GOOGLE_API_KEY=<your-key>` (or set
-    `ANTHROPIC_API_KEY` if your wiki-weaver backend uses it).
+  - *No LLM provider key set* → export at least one of `ANTHROPIC_API_KEY`,
+    `GOOGLE_API_KEY`, or `OPENAI_API_KEY`. `doctor` accepts any of them.
   - *gh not authenticated* → `gh auth login`, confirm with `gh auth status`.
   - *wiki-weaver not found on PATH* → install it (see Requirements).
 - **A source lands in `_failed/`.** weave auto-retries transient provider errors
@@ -212,12 +233,16 @@ window materializes.
 ```
 repo-weaver/
   repo_weaver/
+    __init__.py     # public library API (init/weave/ask/...)  [L2]
     cli.py          # argparse subcommand dispatch; main() -> exit code
     gitio.py        # read-only git + gh subprocess helpers
     materialize.py  # window -> list of (filename, markdown) source docs
     weave.py        # orchestrate: materialize -> _inbox -> wiki-weaver ingest (+ retry)
     policy/
       schema.md     # code-fit page taxonomy (copied into the corpus on init)
+  modules/
+    tool-repo-weaver/  # Amplifier tool module (L3)
+  pipelines/        # .dot attractor pipelines (L1)
   eval/             # quality harness (see eval/README.md)
 ```
 
