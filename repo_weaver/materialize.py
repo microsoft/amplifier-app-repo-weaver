@@ -49,6 +49,16 @@ _README_CANDIDATES = [
 # Maximum body chars shown per PR before truncating.
 _PR_BODY_MAX = 600
 
+# Maximum chars per line in emitted markdown.  Lines produced by
+# textwrap.shorten() collapse all whitespace (including newlines) into a
+# single space, creating lines up to _PR_BODY_MAX long.  Such very-long-line
+# files confuse text-vs-binary heuristics (e.g. wiki-weaver's earlier 8 KB
+# UTF-8 slice check — a multi-byte character straddling the slice boundary
+# raises UnicodeDecodeError and the file is mis-classified as binary).
+# Hard-wrapping at this width keeps every digest line safely below any
+# reasonable text-detection threshold while preserving all content.
+_LINE_WRAP_WIDTH = 200
+
 # ---------------------------------------------------------------------------
 # Notable Commits gating thresholds
 #
@@ -332,6 +342,41 @@ def _format_cross_repo_section(refs: list[tuple[str, str, object]]) -> str:
     return "".join(lines)
 
 
+def _truncate_body(raw: str, max_chars: int) -> str:
+    """Truncate *raw* PR body to *max_chars* total, preserving existing newlines.
+
+    Unlike ``textwrap.shorten()`` — which collapses every newline into a space
+    and returns a *single* line up to *max_chars* long — this function keeps the
+    body's paragraph structure intact.  Any individual line that still exceeds
+    ``_LINE_WRAP_WIDTH`` chars after character-level truncation is hard-wrapped
+    so the emitted markdown never contains pathologically long lines that trip
+    text-detection heuristics (e.g. line-length / newline-ratio based binary
+    classifiers, including wiki-weaver's earlier 8 KB UTF-8 slice check where a
+    multi-byte character straddling the slice boundary raises UnicodeDecodeError
+    and the file is mis-classified as binary).
+
+    Args:
+        raw:       Raw PR body string (may contain newlines).
+        max_chars: Maximum total character count for the excerpt.
+
+    Returns:
+        The excerpt string with preserved newlines, or ``""`` for blank input.
+    """
+    text = raw.strip()
+    if not text:
+        return ""
+    if len(text) > max_chars:
+        text = text[: max_chars - 1] + "\u2026"
+    # Hard-wrap any individual line that is still too long after truncation.
+    wrapped: list[str] = []
+    for line in text.splitlines():
+        if len(line) > _LINE_WRAP_WIDTH:
+            wrapped.extend(textwrap.wrap(line, width=_LINE_WRAP_WIDTH) or [line])
+        else:
+            wrapped.append(line)
+    return "\n".join(wrapped)
+
+
 def _append_pr_detail(
     parts: list[str],
     pr: dict[str, object],
@@ -351,11 +396,7 @@ def _append_pr_detail(
     title = pr.get("title") or "(no title)"
     raw_body = pr.get("body") or ""
     assert isinstance(raw_body, str)
-    body_excerpt = (
-        textwrap.shorten(raw_body.strip(), width=_PR_BODY_MAX, placeholder="\u2026")
-        if raw_body.strip()
-        else ""
-    )
+    body_excerpt = _truncate_body(raw_body, _PR_BODY_MAX)
     author_info = pr.get("author") or {}
     if isinstance(author_info, dict):
         author_name = author_info.get("login") or "unknown"
