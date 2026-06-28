@@ -10,7 +10,7 @@ The target git repo is never mutated.
 ``weave()`` remains the single-repo primitive; ``weave_multi()`` with one repo
 delegates to it so single-repo behaviour is bit-for-bit identical.
 
-**Resilience** — after every ``wiki-weaver ingest`` call the ``_failed/``
+**Resilience** — after every ``wiki-weaver ingest`` call the ``.wiki/failed/``
 directory is inspected and any stranded sources are automatically retried:
 
 * **TRANSIENT** (overloaded / api / timeout / named HTTP 4xx-5xx codes) →
@@ -23,7 +23,7 @@ directory is inspected and any stranded sources are automatically retried:
 * **UNKNOWN** (no diagnostic text yet) → treated as transient for the first
   attempt so we can gather more information from the per-source run.
 
-If a source is still in ``_failed/`` after all retries a loud named summary
+If a source is still in ``.wiki/failed/`` after all retries a loud named summary
 is printed to stderr and the exit code is non-zero.
 """
 
@@ -39,6 +39,13 @@ from collections.abc import Callable
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Any, Optional
+
+from wiki_weaver.lib import (
+    wiki_failed,
+    wiki_inbox,
+    wiki_ledger,
+    wiki_sources,
+)
 
 from . import gitio
 from .materialize import materialize as _materialize
@@ -280,8 +287,8 @@ def _tee_subprocess(cmd: list[str]) -> tuple[int, str]:
 
 
 def _read_ledger_for_source(corpus_path: Path, source_name: str) -> str:
-    """Return raw text of all ``.processed.jsonl`` rows that mention *source_name*."""
-    ledger_path = corpus_path / ".processed.jsonl"
+    """Return raw text of all ``.wiki/.processed.jsonl`` rows that mention *source_name*."""
+    ledger_path = wiki_ledger(corpus_path)
     if not ledger_path.exists():
         return ""
     try:
@@ -308,7 +315,7 @@ def _classify_failure(
     corpus_path: Path,
     captured_output: str = "",
 ) -> str:
-    """Classify a ``_failed/`` source as ``'not_converged'``, ``'transient'``, or ``'permanent'``.
+    """Classify a ``.wiki/failed/`` source as ``'not_converged'``, ``'transient'``, or ``'permanent'``.
 
     Uses an **explicit allowlist**: only returns ``'transient'`` for named,
     tested markers; returns ``'permanent'`` when there is diagnostic text that
@@ -320,7 +327,7 @@ def _classify_failure(
     first per-source retry can gather real diagnostic output.
 
     Checks *captured_output* first (from the most-recent per-source ingest
-    call), then falls back to the ``.processed.jsonl`` ledger.
+    call), then falls back to the ``.wiki/.processed.jsonl`` ledger.
 
     Classification priority:
     1. ``'not_converged'`` — cycle-cap markers present (different remedy).
@@ -363,7 +370,7 @@ def _retry_failed_sources(
     cycles_bump: int = _DEFAULT_CYCLES_BUMP,
     _sleep: Optional[Callable[[float], None]] = None,
 ) -> int:
-    """Retry any sources in ``<corpus>/_failed/`` up to *max_retries* times.
+    """Retry any sources in ``<corpus>/.wiki/failed/`` up to *max_retries* times.
 
     Tactic per failure class:
 
@@ -372,29 +379,29 @@ def _retry_failed_sources(
       attempt cycles are also bumped as belt-and-suspenders.
     * **NOT-CONVERGED** — no back-off; ``--max-cycles`` grows by
       *cycles_bump* on each attempt.
-    * **PERMANENT** — not retried; left in ``_failed/`` and reported loudly.
+    * **PERMANENT** — not retried; left in ``.wiki/failed/`` and reported loudly.
     * **UNKNOWN** (no text yet) — treated as transient for one attempt.
 
     **Stranded-in-inbox detection**: after each per-source ingest attempt the
-    source must be in ``_archive/`` (success) or back in ``_failed/``
+    source must be in ``_sources/`` (success) or back in ``.wiki/failed/``
     (failure).  If it is found in neither location (e.g. wiki-weaver crashed
-    mid-run leaving it in ``_inbox/``), it is rescued back to ``_failed/`` and
+    mid-run leaving it in ``_inbox/``), it is rescued back to ``.wiki/failed/`` and
     classified as permanent — no further retries.
 
     Each retry emits a progress line: source, attempt N/M, reason,
     back-off seconds, cycle budget.
 
-    Returns 0 if every source eventually leaves ``_failed/``, 1 otherwise.
-    Exhausted sources are left in ``_failed/`` and a named summary is
+    Returns 0 if every source eventually leaves ``.wiki/failed/``, 1 otherwise.
+    Exhausted sources are left in ``.wiki/failed/`` and a named summary is
     printed to stderr — **no silent fallbacks**.
     """
     if _sleep is None:
         _sleep = time.sleep
 
     corpus_path = Path(corpus)
-    failed_dir = corpus_path / "_failed"
-    inbox = corpus_path / "_inbox"
-    archive_dir = corpus_path / "_archive"
+    failed_dir = wiki_failed(corpus_path)
+    inbox = wiki_inbox(corpus_path)
+    archive_dir = wiki_sources(corpus_path)
     inbox.mkdir(parents=True, exist_ok=True)
 
     if not failed_dir.exists():
@@ -428,7 +435,7 @@ def _retry_failed_sources(
             )
             reason = str(state["last_reason"])
 
-            # Permanent failures: skip immediately, leave in _failed/.
+            # Permanent failures: skip immediately, leave in .wiki/failed/.
             if reason == "permanent":
                 print(
                     f"[repo-weaver] SKIP  source={source_name!r}  "
@@ -461,7 +468,7 @@ def _retry_failed_sources(
             if delay > 0:
                 _sleep(delay)
 
-            # Move source: _failed/ → _inbox/ before calling ingest.
+            # Move source: .wiki/failed/ → _inbox/ before calling ingest.
             inbox_dest = inbox / source_name
             failed_file.rename(inbox_dest)
 
@@ -484,7 +491,7 @@ def _retry_failed_sources(
             in_archive = archive_dir.exists() and (archive_dir / source_name).exists()
 
             if in_failed:
-                # Still in _failed/: reclassify for the next round.
+                # Still in .wiki/failed/: reclassify for the next round.
                 new_reason = _classify_failure(source_name, corpus_path, output)
                 state["last_reason"] = new_reason
                 if new_reason == "permanent":
@@ -494,14 +501,14 @@ def _retry_failed_sources(
                         file=sys.stderr,
                     )
             elif in_archive:
-                # Moved to _archive/ → genuine success.
+                # Moved to _sources/ → genuine success.
                 print(
                     f"[repo-weaver] OK  source={source_name!r} "
                     f"converged on attempt {attempt}."
                 )
                 state["last_reason"] = "success"
             else:
-                # Source is in neither _failed/ nor _archive/.
+                # Source is in neither .wiki/failed/ nor _sources/.
                 # Likely stranded in _inbox/ (wiki-weaver crashed mid-run).
                 in_inbox = (inbox / source_name).exists()
                 loc = (
@@ -515,7 +522,7 @@ def _retry_failed_sources(
                     "Treating as permanent failure.",
                     file=sys.stderr,
                 )
-                # Rescue: move back to _failed/ so the final report counts it.
+                # Rescue: move back to .wiki/failed/ so the final report counts it.
                 if in_inbox:
                     (inbox / source_name).rename(failed_dir / source_name)
                 else:
@@ -538,14 +545,14 @@ def _retry_failed_sources(
 
     print(
         f"\n[repo-weaver] ERROR: {len(still_failed)} source(s) exhausted all "
-        f"{max_retries} retries and remain in _failed/:",
+        f"{max_retries} retries and remain in .wiki/failed/:",
         file=sys.stderr,
     )
     for name in still_failed:
         last_reason = str(source_state.get(name, {}).get("last_reason", "unknown"))
         print(f"  - {name}  (last failure: {last_reason})", file=sys.stderr)
     print(
-        "[repo-weaver] Inspect _failed/ and .processed.jsonl for details.",
+        "[repo-weaver] Inspect .wiki/failed/ and .wiki/.processed.jsonl for details.",
         file=sys.stderr,
     )
     return 1
@@ -558,7 +565,7 @@ def _run_ingest_with_retry(
     retry_base_delay: float = _DEFAULT_RETRY_BASE_DELAY,
     _sleep: Optional[Callable[[float], None]] = None,
 ) -> int:
-    """Run ``wiki-weaver ingest`` then auto-retry any ``_failed/`` sources.
+    """Run ``wiki-weaver ingest`` then auto-retry any ``.wiki/failed/`` sources.
 
     The initial full-corpus ingest streams directly to the terminal (real-time
     progress).  Per-source retry calls capture output for failure classification.
@@ -581,7 +588,7 @@ def _run_ingest_with_retry(
     if initial_rc != 0:
         print(
             f"[repo-weaver] WARNING: initial ingest exited {initial_rc}; "
-            "checking _failed/ for retriable sources.",
+            "checking .wiki/failed/ for retriable sources.",
             file=sys.stderr,
         )
 
@@ -634,7 +641,7 @@ def weave(
         max_cycles:       Digest cycle budget passed to ``wiki-weaver ingest``.
                           Default raised to 4 (from wiki-weaver's built-in 3) to
                           handle active repos.
-        max_retries:      Max per-source retry attempts after a ``_failed/`` event.
+        max_retries:      Max per-source retry attempts after a ``.wiki/failed/`` event.
         retry_base_delay: Base exponential back-off delay in seconds (transient).
         classify:         If True (default), classify PRs as routine/substantive.
         no_fetch:         If True, skip ``git fetch`` staleness check before
@@ -675,7 +682,7 @@ def weave(
 
     # ---- Archive-skip / idempotency check ----
     # Compute the qualified filename that materialize() will use for this
-    # repo+window.  If it already lives in _archive/, the window was already
+    # repo+window.  If it already lives in _sources/, the window was already
     # processed — skip loudly rather than re-materialising and re-ingesting.
     # This mirrors the archive-skip in weave_multi(); both must compute
     # file_qualifier the same way so the check is always consistent.
@@ -686,7 +693,7 @@ def weave(
     else:
         _file_qualifier = Path(repo).name
     _changes_filename = f"{_file_qualifier}-{until}-changes.md"
-    _archive_dir = Path(corpus) / "_archive"
+    _archive_dir = wiki_sources(Path(corpus))
     if _archive_dir.exists() and (_archive_dir / _changes_filename).exists():
         print(
             f"[repo-weaver] {Path(repo).name} \u2014 "
@@ -711,7 +718,7 @@ def weave(
         return 0
 
     # ---- Write to _inbox ----
-    inbox = Path(corpus) / "_inbox"
+    inbox = wiki_inbox(Path(corpus))
     inbox.mkdir(parents=True, exist_ok=True)
 
     print(f"[repo-weaver] Writing {len(docs)} source document(s) to {inbox}/")
@@ -782,7 +789,7 @@ def weave_multi(
         max_modules:      Maximum module snapshot documents to emit per repo.
         dry_run:          If True, write _inbox files but skip the ingest step.
         max_cycles:       Digest cycle budget passed to ``wiki-weaver ingest``.
-        max_retries:      Max per-source retry attempts after a ``_failed/`` event.
+        max_retries:      Max per-source retry attempts after a ``.wiki/failed/`` event.
         retry_base_delay: Base exponential back-off delay in seconds (transient).
         _sleep:           Injectable sleep callable (tests pass a no-op).
 
@@ -839,7 +846,7 @@ def weave_multi(
     # ---- Phase 2: materialise each repo ----
     all_docs: list[tuple[str, str]] = []
     corpus_path = Path(corpus)
-    archive_dir = corpus_path / "_archive"
+    archive_dir = wiki_sources(corpus_path)
 
     for idx, repo in enumerate(repos, 1):
         repo_qualifier = Path(repo).name  # e.g. "amplifier-app-team-pulse"
@@ -867,7 +874,7 @@ def weave_multi(
             else:
                 effective_since = "2000-01-01"
 
-        # Resume skip: if this repo's change digest is already in _archive/
+        # Resume skip: if this repo's change digest is already in _sources/
         # for this window, there is no point materialising and re-ingesting it
         # (wiki-weaver would dedup-skip it anyway).  Skip loudly so the user
         # can see what was spared on a resumed run.
@@ -915,7 +922,7 @@ def weave_multi(
         return 0
 
     # ---- Write to _inbox ----
-    inbox = Path(corpus) / "_inbox"
+    inbox = wiki_inbox(Path(corpus))
     inbox.mkdir(parents=True, exist_ok=True)
 
     print(f"\n[repo-weaver] Writing {len(all_docs)} source document(s) to {inbox}/")
@@ -971,9 +978,9 @@ def replay_windows(
     processing resumes at the first incomplete one.
 
     **Fail-loud guarantee**: a window is marked complete ONLY when
-    ``weave_multi`` returns 0.  A window that failed (sources in ``_failed/``,
+    ``weave_multi`` returns 0.  A window that failed (sources in ``.wiki/failed/``,
     provider error, etc.) is never recorded as done, so the next run
-    re-attempts it — including any sources still in ``_failed/`` from the
+    re-attempts it — including any sources still in ``.wiki/failed/`` from the
     prior run, which ``_retry_failed_sources`` will pick up and retry.
 
     Args:

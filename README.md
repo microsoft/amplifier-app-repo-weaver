@@ -186,7 +186,7 @@ Two knobs tune the ingest behavior:
 | Flag | Default | What it does |
 |------|---------|--------------|
 | `--max-cycles N` | 4 | Digest cycle budget passed to `wiki-weaver ingest`. Raise for dense repos that do not converge in the default budget. |
-| `--max-retries N` | 3 | Per-source retry attempts after a `_failed/` event. Transient provider errors (overloaded, rate limit, timeout, 429/500/503/504/529) auto-retry with exponential back-off; not-converged sources retry with a bumped cycle budget; permanent errors (auth, 404, unrecognised text) are **not** retried and fail loud. |
+| `--max-retries N` | 3 | Per-source retry attempts after a `.wiki/failed/` event. Transient provider errors (overloaded, rate limit, timeout, 429/500/503/504/529) auto-retry with exponential back-off; not-converged sources retry with a bumped cycle budget; permanent errors (auth, 404, unrecognised text) are **not** retried and fail loud. |
 
 `--max-prs` (default 15) and `--max-modules` (default 5) cap how much history each
 window materializes.
@@ -205,10 +205,11 @@ repo-weaver build-dashboard ~/corpora/my-team --out ~/my-team.html
 |----------|----------|--------------|
 | `<corpus>` | yes | The wiki corpus directory to render. |
 | `--out PATH` | yes | Destination `.html` file. |
-| `--theme PATH` | no | A `theme.json` to override the corpus's `.wiki-dashboard/theme.json`. |
+| `--theme PATH` | no | A `theme.json` to override the corpus's `.wiki/dashboard/theme.json`. |
 
 `build-dashboard` shells out to `wiki-weaver build-dashboard` (the same subprocess
-boundary as `weave` and `ask` — no vendoring, no wiki-weaver imports). The two
+boundary as `weave` and `ask` — all synthesis, query, and dashboard LLM work stays
+behind the wiki-weaver CLI, with no engine imports or vendoring). The two
 repo-specific touches it adds are:
 
 - **Grouped by repo** — the sidebar is grouped by each page's `repos:` frontmatter
@@ -221,7 +222,7 @@ The output is one self-contained `.html` file — open it directly in a browser 
 in Obsidian; **no server required**.
 
 **Theming.** On the first run, repo-weaver seeds the corpus with a default
-`<corpus>/.wiki-dashboard/theme.json` (title **"Repo Weaver"** plus a slate
+`<corpus>/.wiki/dashboard/theme.json` (title **"Repo Weaver"** plus a slate
 accent). It **never clobbers** an existing `theme.json`, so your customizations
 survive re-runs. Pass `--theme PATH` to override per-build; theming (color /
 typography / shape tokens, optional title, and `custom.css`) flows through to
@@ -250,16 +251,16 @@ wiki-weaver, which reads the theme file.
     `GOOGLE_API_KEY`, or `OPENAI_API_KEY`. `doctor` accepts any of them.
   - *gh not authenticated* → `gh auth login`, confirm with `gh auth status`.
   - *wiki-weaver not found on PATH* → install it (see Requirements).
-- **A source lands in `_failed/`.** weave auto-retries transient provider errors
+- **A source lands in `.wiki/failed/`.** weave auto-retries transient provider errors
   (back-off) and not-converged sources (more cycles), but fails loud on permanent
-  errors and leaves them in `_failed/` with a named summary on stderr. Inspect
-  `_failed/` and `.processed.jsonl` for the diagnostic text.
+  errors and leaves them in `.wiki/failed/` with a named summary on stderr. Inspect
+  `.wiki/failed/` and `.wiki/.processed.jsonl` for the diagnostic text.
 - **Check corpus integrity** with the deterministic gate:
   ```bash
   python -m eval.coverage_check --corpus ~/corpora/team-pulse
   ```
   It PASSes only when every registered source was ingested, has a converged
-  ledger entry, and `_failed/` is empty.
+  ledger entry, and `.wiki/failed/` is empty.
 
 ---
 
@@ -296,8 +297,12 @@ repo-weaver/
   eval/             # quality harness (see eval/README.md)
 ```
 
-repo-weaver shells out to `wiki-weaver`, `git`, and `gh` — it never imports them
-as Python libraries and never mutates a repo's working tree.
+repo-weaver shells out to `wiki-weaver`, `git`, and `gh` for all synthesis, query,
+git, and `gh` work — it never folds in their engines and never mutates a repo's
+working tree. The one import is **non-LLM**: it pulls wiki-weaver's corpus-layout
+path constants (`wiki_ledger`, `wiki_failed`, `wiki_sources`, `wiki_inbox`,
+`wiki_dashboard`) directly, so the two repos share a **single source of truth** for
+where corpus files live (the `.wiki/` layout). See [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ---
 

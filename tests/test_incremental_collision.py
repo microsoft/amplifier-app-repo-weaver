@@ -44,6 +44,8 @@ from pathlib import Path
 from typing import Iterator
 from unittest.mock import patch
 
+from wiki_weaver.lib import wiki_sources
+
 from repo_weaver.weave import weave, weave_multi
 
 
@@ -90,7 +92,7 @@ def _setup_corpus(tmp_path: Path) -> Path:
     corpus = tmp_path / "corpus"
     corpus.mkdir()
     (corpus / "_inbox").mkdir()
-    (corpus / "_archive").mkdir()
+    wiki_sources(corpus).mkdir(parents=True, exist_ok=True)
     return corpus
 
 
@@ -342,8 +344,8 @@ def test_single_repo_archive_skip_qualified_name(tmp_path: Path) -> None:
     origin_url = "https://github.com/acme/myrepo.git"
     qualified_name = f"acme__myrepo-{_UNTIL}-changes.md"
 
-    # Pre-seed _archive/ with the qualified filename.
-    (corpus / "_archive" / qualified_name).write_text(
+    # Pre-seed _sources/ with the qualified filename.
+    (wiki_sources(corpus) / qualified_name).write_text(
         "# archived from prior run\n", encoding="utf-8"
     )
 
@@ -378,8 +380,8 @@ def test_weave_multi_archive_skip_qualified_name(tmp_path: Path) -> None:
     origin_b = "https://github.com/org/repo-beta.git"
     qualified_a = f"org__repo-alpha-{_UNTIL}-changes.md"
 
-    # Pre-seed _archive/ with repo-alpha's QUALIFIED digest.
-    (corpus / "_archive" / qualified_a).write_text(
+    # Pre-seed _sources/ with repo-alpha's QUALIFIED digest.
+    (wiki_sources(corpus) / qualified_a).write_text(
         "# archived from prior run\n", encoding="utf-8"
     )
 
@@ -454,7 +456,7 @@ def test_no_remote_archive_skip_uses_basename(tmp_path: Path) -> None:
     corpus = _setup_corpus(tmp_path)
 
     basename_name = f"local-proj-{_UNTIL}-changes.md"
-    (corpus / "_archive" / basename_name).write_text("# archived\n", encoding="utf-8")
+    (wiki_sources(corpus) / basename_name).write_text("# archived\n", encoding="utf-8")
 
     rc = _weave_dry(corpus, repo, origin_url=None)
     assert rc == 0, f"weave() returned rc={rc}"
