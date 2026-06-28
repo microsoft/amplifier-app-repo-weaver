@@ -1,0 +1,26 @@
+{
+  "_name": "Repo Weaver — GitHub-flavoured slate theme",
+  "_note": "Shipped with repo-weaver; written to <corpus>/.wiki-dashboard/theme.json if absent. Per-token overrides applied over wiki-weaver's Almanac defaults.",
+
+  "title": "Repo Weaver",
+
+  "--wiki-bg":              "#F6F8FA",
+  "--wiki-sidebar":         "#EAEEF2",
+  "--wiki-card":            "#FFFFFF",
+  "--wiki-subtle":          "#E8ECF0",
+  "--wiki-border":          "#D0D7DE",
+  "--wiki-border-strong":   "#AFB8C1",
+
+  "--wiki-text":            "#1F2328",
+  "--wiki-text-secondary":  "#424A53",
+  "--wiki-text-muted":      "#636C76",
+
+  "--wiki-accent":          "#0969DA",
+  "--wiki-accent-hover":    "#0550AE",
+  "--wiki-accent-tint":     "#DDF4FF",
+
+  "--wiki-font-reading":    "system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif",
+
+  "--wiki-content-width":   "76ch",
+  "--wiki-radius":          "6px"
+}

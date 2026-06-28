@@ -9,6 +9,7 @@ Usage:
     repo-weaver weave --corpus DIR [options]
     repo-weaver ask "<question>" --corpus DIR [--json]
     repo-weaver replay --corpus DIR --windows "D1,D2,..." [options]
+    repo-weaver build-dashboard <corpus> --out PATH [--theme PATH]
 """
 
 from __future__ import annotations
@@ -20,10 +21,19 @@ import shutil
 import subprocess
 import sys
 from datetime import date, timedelta
+from pathlib import Path
 from typing import Optional
 
 from . import gitio
 from .weave import _DEFAULT_MAX_CYCLES, _DEFAULT_MAX_RETRIES, _POLICY_SCHEMA
+
+# Default theme shipped with repo-weaver — written to a corpus's
+# .wiki-dashboard/theme.json on first build-dashboard run (idempotent).
+_DEFAULT_THEME: Path = Path(__file__).parent / "themes" / "default.json"
+
+# GitHub group-link template: the ONLY repo-weaver-specific policy injected
+# into the generic wiki-weaver build-dashboard call.
+_GITHUB_GROUP_LINK_TEMPLATE = "https://github.com/{group}"
 
 # repo_weaver/__init__.py exports a public function also named ``weave``, which
 # shadows the submodule when accessed as a package attribute.  Both of these
@@ -317,6 +327,97 @@ def cmd_replay(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Subcommand: build-dashboard
+# ---------------------------------------------------------------------------
+
+
+def _ensure_corpus_theme(corpus: str) -> None:
+    """Write the packaged repo-weaver default theme into the corpus if absent.
+
+    wiki-weaver reads ``.wiki-dashboard/theme.json`` automatically; writing it
+    here (idempotently) means the repo-weaver title + GitHub-flavoured accent
+    apply without the caller needing to pass ``--theme`` every time.
+    """
+    dashboard_dir = Path(corpus) / ".wiki-dashboard"
+    theme_dst = dashboard_dir / "theme.json"
+    if theme_dst.exists():
+        return  # user already has a theme; never clobber it
+
+    if not _DEFAULT_THEME.exists():
+        print(
+            "WARNING: packaged repo-weaver theme not found; dashboard will use wiki-weaver defaults.",
+            file=sys.stderr,
+        )
+        return
+
+    dashboard_dir.mkdir(parents=True, exist_ok=True)
+    theme_dst.write_text(_DEFAULT_THEME.read_text(encoding="utf-8"), encoding="utf-8")
+    print(f"[repo-weaver] Wrote default theme → {theme_dst}", flush=True)
+
+
+def cmd_build_dashboard(args: argparse.Namespace) -> int:
+    """Build a repo-flavoured HTML dashboard via wiki-weaver build-dashboard.
+
+    Delegates entirely to ``wiki-weaver build-dashboard`` using the existing
+    subprocess boundary (zero direct LLM calls, zero wiki-weaver imports).
+
+    repo-weaver contributes two domain-specific policies on top of the generic
+    wiki-weaver mechanism:
+
+    1. ``--group-by repos`` — pages are grouped by their ``repos:`` frontmatter
+       list field (multi-membership: a page appears under every repo it touches).
+    2. ``--group-link-template 'https://github.com/{group}'`` — each repo group
+       header becomes a live GitHub link.
+
+    A packaged default theme (title + GitHub-flavoured accent) is written to
+    ``<corpus>/.wiki-dashboard/theme.json`` if one is not already present.
+    """
+    corpus = args.corpus
+
+    # Probe: does the installed wiki-weaver support build-dashboard?
+    probe = subprocess.run(
+        ["wiki-weaver", "build-dashboard", "--help"],
+        capture_output=True,
+        text=True,
+    )
+    if probe.returncode != 0:
+        print(
+            "ERROR: wiki-weaver does not support the 'build-dashboard' subcommand.\n"
+            "Install or upgrade wiki-weaver:\n"
+            "  uv tool install --force --editable <path/to/wiki-weaver-checkout>\n"
+            "  OR  pip install --upgrade wiki-weaver",
+            file=sys.stderr,
+        )
+        return 1
+
+    # Idempotently seed the corpus with the repo-weaver default theme.
+    _ensure_corpus_theme(corpus)
+
+    # Build the wiki-weaver argv.  The only repo-weaver-specific bits are:
+    #   --group-by repos                (group by the multi-valued repos: field)
+    #   --group-link-template           (turn group headers into GitHub links)
+    argv: list[str] = [
+        "wiki-weaver",
+        "build-dashboard",
+        corpus,
+        "--out",
+        args.out,
+        "--group-by",
+        "repos",
+        "--group-link-template",
+        _GITHUB_GROUP_LINK_TEMPLATE,
+    ]
+    if getattr(args, "theme", None):
+        argv += ["--theme", args.theme]
+
+    # Flush before the subprocess so our progress message appears in the
+    # correct order alongside wiki-weaver's direct stdout writes.
+    print(f"[repo-weaver] Running: {' '.join(argv)}", flush=True)
+    result = subprocess.run(argv)
+    return result.returncode
+
+
+# ---------------------------------------------------------------------------
 # Argument parser
 # ---------------------------------------------------------------------------
 
@@ -518,6 +619,31 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     p.set_defaults(func=cmd_replay)
+
+    # ---- build-dashboard ----
+    p = sub.add_parser(
+        "build-dashboard",
+        help=(
+            "Build a repo-flavoured HTML dashboard via wiki-weaver build-dashboard. "
+            "Pages are grouped by repos: field (multi-membership); each group header "
+            "links to https://github.com/<repo>."
+        ),
+    )
+    p.add_argument("corpus", help="wiki corpus directory.")
+    p.add_argument(
+        "--out", required=True, metavar="PATH", help="Destination .html file."
+    )
+    p.add_argument(
+        "--theme",
+        metavar="PATH",
+        default=None,
+        help=(
+            "Path to a theme.json file (optional). Overrides the corpus's "
+            ".wiki-dashboard/theme.json. If absent, the packaged repo-weaver "
+            "default theme (GitHub-flavoured slate) is used."
+        ),
+    )
+    p.set_defaults(func=cmd_build_dashboard)
 
     return parser
 
