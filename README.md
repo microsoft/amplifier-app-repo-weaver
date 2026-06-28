@@ -193,6 +193,56 @@ window materializes.
 
 ---
 
+## Dashboard (browse the corpus as HTML)
+
+Once a corpus has pages, render it into a single **self-contained HTML dashboard**:
+
+```bash
+repo-weaver build-dashboard ~/corpora/my-team --out ~/my-team.html
+```
+
+| Argument | Required | What it does |
+|----------|----------|--------------|
+| `<corpus>` | yes | The wiki corpus directory to render. |
+| `--out PATH` | yes | Destination `.html` file. |
+| `--theme PATH` | no | A `theme.json` to override the corpus's `.wiki-dashboard/theme.json`. |
+
+`build-dashboard` shells out to `wiki-weaver build-dashboard` (the same subprocess
+boundary as `weave` and `ask` — no vendoring, no wiki-weaver imports). The two
+repo-specific touches it adds are:
+
+- **Grouped by repo** — the sidebar is grouped by each page's `repos:` frontmatter
+  list. A page that touches several repos appears under **every** repo it touches
+  (multi-membership), so you can read the corpus one repo at a time.
+- **GitHub group links** — each repo group header is a live link to
+  `https://github.com/<owner/repo>`.
+
+The output is one self-contained `.html` file — open it directly in a browser or
+in Obsidian; **no server required**.
+
+**Theming.** On the first run, repo-weaver seeds the corpus with a default
+`<corpus>/.wiki-dashboard/theme.json` (title **"Repo Weaver"** plus a slate
+accent). It **never clobbers** an existing `theme.json`, so your customizations
+survive re-runs. Pass `--theme PATH` to override per-build; theming (color /
+typography / shape tokens, optional title, and `custom.css`) flows through to
+wiki-weaver, which reads the theme file.
+
+> [!IMPORTANT]
+> `build-dashboard` requires a **current** wiki-weaver — one that has the
+> `build-dashboard` subcommand. Verify with:
+> ```bash
+> wiki-weaver build-dashboard --help
+> ```
+> If that fails, your installed wiki-weaver is too old. Update it (the `--force`
+> reinstalls over the existing tool):
+> ```bash
+> uv tool install --force git+https://github.com/microsoft/amplifier-bundle-wiki-weaver
+> ```
+> repo-weaver also probes this for you and fails loud with the same hint rather
+> than producing a broken dashboard.
+
+---
+
 ## Troubleshooting
 
 - **`doctor` reports a failure.** Fix the named row before any long run:

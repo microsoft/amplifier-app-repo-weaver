@@ -17,7 +17,7 @@ direct LLM / model API calls** — it is deterministic plumbing plus an authored
 |---|---|---|
 | Role | Generic LLM wiki-synthesis **engine** (mechanism) | Git-aware **front-end** (policy / content) |
 | Input | A folder of source docs + a `policy/schema.md` | Git repos (commits + merged PRs) |
-| Does | Ingests, reconciles, cites, weaves concept pages, answers queries | Adapts git → source docs, orchestrates weaves, grades output |
+| Does | Ingests, reconciles, cites, weaves concept pages, answers queries, builds HTML dashboards | Adapts git → source docs, orchestrates weaves, grades output, builds repo-flavoured dashboards |
 | Knows about git? | No — domain-agnostic | Yes — this is its whole job |
 
 repo-weaver **never imports** wiki-weaver (`dependencies = []`). The boundary is a
@@ -25,6 +25,7 @@ process boundary, crossed only via subprocess:
 
 - Every synthesis is `subprocess.run(["wiki-weaver", "ingest", ...])` — `weave.py:~533`
 - Every query is `subprocess.run(["wiki-weaver", "ask", ...])` — `cli.py:~284`
+- Every dashboard build is `subprocess.run(["wiki-weaver", "build-dashboard", ..., "--group-by", "repos", "--group-link-template", "https://github.com/{group}"])` — `cli.py:cmd_build_dashboard`
 
 ![Architecture](docs/architecture.png)
 
@@ -52,11 +53,19 @@ repo-weaver's **content/policy** fed into wiki-weaver's externalized-schema **me
   fail loud on ambiguity.
 - Per-repo index/overview grouping; append-only `log` page.
 
-### `repo_weaver/weave.py` + `cli.py` (~1,600 LOC) — weave orchestration
+### `repo_weaver/weave.py` + `cli.py` (~1,600 LOC) — weave orchestration + dashboard
 
 Multi-repo, windowed, incremental/staggered weave orchestration: raised digest cycle
 budget, retry with backoff, strand-rescue when the engine crashes mid-run, archive-skip
 dedup, fetch-or-warn staleness check.
+
+`cli.py` also exposes `build-dashboard` — a thin subprocess shell that calls
+`wiki-weaver build-dashboard` with two repo-flavoured policy injections:
+`--group-by repos` (multi-membership grouping on the `repos:` list field) and
+`--group-link-template 'https://github.com/{group}'` (repo group headers become
+GitHub links). A packaged default theme (`repo_weaver/themes/default.json`,
+GitHub-flavoured slate accent) is seeded idempotently into the corpus's
+`.wiki-dashboard/theme.json` on first run.
 
 ### `eval/` (~1,350 LOC) — deterministic eval harness
 

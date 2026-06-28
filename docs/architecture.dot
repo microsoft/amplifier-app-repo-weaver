@@ -22,7 +22,7 @@ digraph repo_weaver_architecture {
     style=filled; fillcolor="#eaf2fc"; color="#4a78b5"; penwidth=2;
     fontsize=13; fontname="Helvetica-Bold";
 
-    cli [label="cli.py\nthin CLI:\ninit / weave / ask /\nreplay / doctor", shape=box];
+    cli [label="cli.py\nthin CLI:\ninit / weave / ask /\nreplay / doctor /\nbuild-dashboard", shape=box];
     weave [label="lib/weave.py\nweave · weave_multi · replay_windows\n(windowed, incremental/staggered, retry,\nstrand-rescue, dedup, fetch-or-warn)", shape=box];
     materialize [label="lib/materialize.py\ngit history → source docs\n(change digests, Notable Commits,\nmodule snapshots, owner__repo files)", shape=box];
     gitio [label="lib/gitio.py\ngit + gh plumbing\n(fetch / fast-forward staleness)", shape=box];
@@ -48,6 +48,7 @@ digraph repo_weaver_architecture {
   // ---------- OUTPUT / intermediate stores ----------
   inbox [label="corpus/_inbox/*.md\nmaterialized source docs", shape=cylinder, fillcolor="#ffe6cc", color="#d79b00"];
   corpus [label="corpus/*.md concept pages\n+ corpus/_archive\n(OUTPUT)", shape=cylinder, fillcolor="#ffe6cc", color="#d79b00"];
+  dashboard [label="dashboard.html\n(self-contained)\ngrouped by repos:\nGitHub group links", shape=note, fillcolor="#e8f4e8", color="#4a8a4a"];
   user [label="user", shape=ellipse, fillcolor="#d5e8d4", color="#82b366"];
 
   // ================= in-process Python edges (solid) =================
@@ -69,6 +70,8 @@ digraph repo_weaver_architecture {
   // ================= SUBPROCESS BOUNDARY edges (bold red) =================
   weave -> ww_cli [label="  subprocess:\n  wiki-weaver ingest  ", style=bold, penwidth=2.6, color="#b85450", fontcolor="#a02020", lhead=cluster_wikiweaver];
   cli -> ww_cli [label="  subprocess:\n  wiki-weaver ask  ", style=bold, penwidth=2.6, color="#b85450", fontcolor="#a02020", lhead=cluster_wikiweaver];
+  cli -> ww_cli [label="  subprocess:\n  wiki-weaver build-dashboard\n  --group-by repos\n  --group-link-template\n  https://github.com/{group}  ", style=bold, penwidth=2.6, color="#b85450", fontcolor="#a02020", lhead=cluster_wikiweaver];
+  ww_cli -> dashboard [label="HTML output\n(repo-branded)", style=bold, penwidth=2.0, color="#4a8a4a", fontcolor="#2a5a2a"];
   ww_cli -> user [label="cited answer", style=bold, penwidth=2.0, color="#b85450", fontcolor="#a02020"];
 
   // ============================ LEGEND ============================
