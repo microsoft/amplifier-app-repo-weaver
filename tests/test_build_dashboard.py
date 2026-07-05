@@ -190,7 +190,8 @@ def test_ensure_corpus_theme_writes_default_when_absent(tmp_path):
     """_ensure_corpus_theme must write the packaged default into an empty corpus."""
     corpus_dir = tmp_path / "corpus"
     corpus_dir.mkdir()
-    theme_dst = corpus_dir / ".wiki-dashboard" / "theme.json"
+    from wiki_weaver.lib import wiki_dashboard
+    theme_dst = wiki_dashboard(corpus_dir) / "theme.json"
 
     assert not theme_dst.exists(), "precondition: no theme yet"
     cli._ensure_corpus_theme(str(corpus_dir))
@@ -207,8 +208,9 @@ def test_ensure_corpus_theme_writes_default_when_absent(tmp_path):
 
 def test_ensure_corpus_theme_does_not_clobber_existing(tmp_path):
     """_ensure_corpus_theme must not overwrite a user's existing theme.json."""
+    from wiki_weaver.lib import wiki_dashboard
     corpus_dir = tmp_path / "corpus"
-    dash_dir = corpus_dir / ".wiki-dashboard"
+    dash_dir = wiki_dashboard(corpus_dir)
     dash_dir.mkdir(parents=True)
     existing_theme = dash_dir / "theme.json"
     existing_theme.write_text('{"title": "My Custom Title"}', encoding="utf-8")

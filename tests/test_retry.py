@@ -27,6 +27,8 @@ from pathlib import Path
 
 import pytest
 
+from wiki_weaver.lib import wiki_failed, wiki_inbox, wiki_ledger, wiki_sources
+
 from repo_weaver.weave import (
     _DEFAULT_CYCLES_BUMP,
     _DEFAULT_MAX_CYCLES,
@@ -91,9 +93,10 @@ def main() -> int:
         return 1
 
     corpus = Path(wiki)
-    failed_dir = corpus / "_failed"
+    failed_dir = corpus / ".wiki" / "failed"
     inbox = corpus / "_inbox"
-    archive_dir = corpus / "_archive"
+    archive_dir = corpus / "_sources"
+    (corpus / ".wiki").mkdir(exist_ok=True)
     failed_dir.mkdir(exist_ok=True)
     archive_dir.mkdir(exist_ok=True)
 
@@ -191,13 +194,15 @@ def _setup_corpus(
     """
     corpus = tmp_path / "corpus"
     corpus.mkdir()
-    for sub in ("_failed", "_inbox", "_archive"):
-        (corpus / sub).mkdir()
-    (corpus / "_failed" / source_name).write_text(
+    wiki_inbox(corpus).mkdir(parents=True, exist_ok=True)
+    wiki_failed(corpus).mkdir(parents=True, exist_ok=True)
+    wiki_sources(corpus).mkdir(parents=True, exist_ok=True)
+    (wiki_failed(corpus) / source_name).write_text(
         "# test source content\n", encoding="utf-8"
     )
     if ledger_entry is not None:
-        (corpus / ".processed.jsonl").write_text(
+        wiki_ledger(corpus).parent.mkdir(parents=True, exist_ok=True)
+        wiki_ledger(corpus).write_text(
             json.dumps(ledger_entry) + "\n", encoding="utf-8"
         )
     return corpus
@@ -266,9 +271,9 @@ def test_transient_retry_eventually_succeeds(tmp_path, fake_ww_env):
     )
 
     assert rc == 0, f"Expected 0, got {rc}"
-    failed_files = list((corpus / "_failed").iterdir())
+    failed_files = list(wiki_failed(corpus).iterdir())
     assert failed_files == [], f"_failed/ should be empty, found: {failed_files}"
-    assert (corpus / "_archive" / _SOURCE_NAME).exists(), (
+    assert (wiki_sources(corpus) / _SOURCE_NAME).exists(), (
         "Source should be archived after successful retry"
     )
     # Three retry attempts: each with backoff (1.0, 2.0, 4.0).
@@ -303,9 +308,9 @@ def test_exhausted_retries_exits_nonzero(tmp_path, fake_ww_env):
     )
 
     assert rc != 0, "Expected non-zero exit when all retries exhausted"
-    failed_files = list((corpus / "_failed").iterdir())
+    failed_files = list(wiki_failed(corpus).iterdir())
     assert len(failed_files) == 1, (
-        f"Source should remain in _failed/, found: {failed_files}"
+        f"Source should remain in .wiki/failed/, found: {failed_files}"
     )
     assert failed_files[0].name == _SOURCE_NAME
 
@@ -352,8 +357,8 @@ def test_not_converged_bumps_max_cycles(tmp_path, fake_ww_env):
     )
 
     assert rc != 0, "Expected non-zero (always fails with not_converged)"
-    assert (corpus / "_failed" / _SOURCE_NAME).exists(), (
-        "Source should still be in _failed/"
+    assert (wiki_failed(corpus) / _SOURCE_NAME).exists(), (
+        "Source should still be in .wiki/failed/"
     )
 
     calls = _read_call_log(corpus)

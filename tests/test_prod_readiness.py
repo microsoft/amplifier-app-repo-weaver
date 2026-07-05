@@ -42,6 +42,8 @@ from pathlib import Path
 
 import pytest
 
+from wiki_weaver.lib import wiki_failed, wiki_ledger, wiki_sources
+
 from repo_weaver.weave import (
     _DEFAULT_MAX_CYCLES,
     _classify_failure,
@@ -179,9 +181,10 @@ def main() -> int:
         return 1
 
     corpus = Path(wiki)
-    failed_dir = corpus / "_failed"
+    failed_dir = corpus / ".wiki" / "failed"
     inbox = corpus / "_inbox"
-    archive_dir = corpus / "_archive"
+    archive_dir = corpus / "_sources"
+    (corpus / ".wiki").mkdir(exist_ok=True)
     failed_dir.mkdir(exist_ok=True)
     archive_dir.mkdir(exist_ok=True)
 
@@ -276,13 +279,15 @@ def _setup_corpus(
 ) -> Path:
     corpus = tmp_path / "corpus"
     corpus.mkdir()
-    for sub in ("_failed", "_inbox", "_archive"):
-        (corpus / sub).mkdir()
-    (corpus / "_failed" / source_name).write_text(
+    wiki_failed(corpus).mkdir(parents=True, exist_ok=True)
+    wiki_ledger(corpus).parent.mkdir(parents=True, exist_ok=True)
+    (corpus / "_inbox").mkdir(parents=True, exist_ok=True)
+    wiki_sources(corpus).mkdir(parents=True, exist_ok=True)
+    (wiki_failed(corpus) / source_name).write_text(
         "# test source content\n", encoding="utf-8"
     )
     if ledger_entry is not None:
-        (corpus / ".processed.jsonl").write_text(
+        wiki_ledger(corpus).write_text(
             json.dumps(ledger_entry) + "\n", encoding="utf-8"
         )
     return corpus
@@ -332,13 +337,13 @@ def test_stranded_in_inbox_fails_loud(tmp_path, fake_ww_env):
     )
 
     assert rc != 0, "Should return non-zero when source is stranded in _inbox/"
-    # Source must NOT be in _archive/ (would falsely indicate convergence).
-    assert not (corpus / "_archive" / _SOURCE_NAME).exists(), (
+    # Source must NOT be in _sources/ (would falsely indicate convergence).
+    assert not (wiki_sources(corpus) / _SOURCE_NAME).exists(), (
         "Stranded source must not be reported as archived/converged"
     )
-    # Source should have been rescued back to _failed/ for the final report.
-    assert (corpus / "_failed" / _SOURCE_NAME).exists(), (
-        "Rescued source should be in _failed/ so the final summary counts it"
+    # Source should have been rescued back to .wiki/failed/ for the final report.
+    assert (wiki_failed(corpus) / _SOURCE_NAME).exists(), (
+        "Rescued source should be in .wiki/failed/ so the final summary counts it"
     )
 
 
@@ -356,7 +361,7 @@ def test_stranded_in_inbox_not_counted_as_success(tmp_path, fake_ww_env):
     )
 
     assert rc != 0
-    assert not (corpus / "_archive" / _SOURCE_NAME).exists()
+    assert not (wiki_sources(corpus) / _SOURCE_NAME).exists()
 
 
 # ---------------------------------------------------------------------------

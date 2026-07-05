@@ -24,11 +24,13 @@ from datetime import date, timedelta
 from pathlib import Path
 from typing import Optional
 
+from wiki_weaver.lib import wiki_dashboard
+
 from . import gitio
 from .weave import _DEFAULT_MAX_CYCLES, _DEFAULT_MAX_RETRIES, _POLICY_SCHEMA
 
 # Default theme shipped with repo-weaver — written to a corpus's
-# .wiki-dashboard/theme.json on first build-dashboard run (idempotent).
+# .wiki/dashboard/theme.json on first build-dashboard run (idempotent).
 _DEFAULT_THEME: Path = Path(__file__).parent / "themes" / "default.json"
 
 # GitHub group-link template: the ONLY repo-weaver-specific policy injected
@@ -334,11 +336,11 @@ def cmd_replay(args: argparse.Namespace) -> int:
 def _ensure_corpus_theme(corpus: str) -> None:
     """Write the packaged repo-weaver default theme into the corpus if absent.
 
-    wiki-weaver reads ``.wiki-dashboard/theme.json`` automatically; writing it
+    wiki-weaver reads ``.wiki/dashboard/theme.json`` automatically; writing it
     here (idempotently) means the repo-weaver title + GitHub-flavoured accent
     apply without the caller needing to pass ``--theme`` every time.
     """
-    dashboard_dir = Path(corpus) / ".wiki-dashboard"
+    dashboard_dir = wiki_dashboard(Path(corpus))
     theme_dst = dashboard_dir / "theme.json"
     if theme_dst.exists():
         return  # user already has a theme; never clobber it
@@ -359,7 +361,8 @@ def cmd_build_dashboard(args: argparse.Namespace) -> int:
     """Build a repo-flavoured HTML dashboard via wiki-weaver build-dashboard.
 
     Delegates entirely to ``wiki-weaver build-dashboard`` using the existing
-    subprocess boundary (zero direct LLM calls, zero wiki-weaver imports).
+    subprocess boundary (zero direct LLM calls).  Path helpers are imported
+    from ``wiki_weaver.lib`` so corpus layout never drifts between the two.
 
     repo-weaver contributes two domain-specific policies on top of the generic
     wiki-weaver mechanism:
@@ -370,7 +373,7 @@ def cmd_build_dashboard(args: argparse.Namespace) -> int:
        header becomes a live GitHub link.
 
     A packaged default theme (title + GitHub-flavoured accent) is written to
-    ``<corpus>/.wiki-dashboard/theme.json`` if one is not already present.
+    ``<corpus>/.wiki/dashboard/theme.json`` if one is not already present.
     """
     corpus = args.corpus
 
@@ -520,7 +523,7 @@ def _build_parser() -> argparse.ArgumentParser:
         default=_DEFAULT_MAX_RETRIES,
         metavar="N",
         help=(
-            f"Max per-source retry attempts after a _failed/ event (default: {_DEFAULT_MAX_RETRIES}). "
+            f"Max per-source retry attempts after a .wiki/failed/ event (default: {_DEFAULT_MAX_RETRIES}). "
             "Each transient-error retry applies exponential back-off; "
             "each not-converged retry increases --max-cycles."
         ),
@@ -639,7 +642,7 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "Path to a theme.json file (optional). Overrides the corpus's "
-            ".wiki-dashboard/theme.json. If absent, the packaged repo-weaver "
+            ".wiki/dashboard/theme.json. If absent, the packaged repo-weaver "
             "default theme (GitHub-flavoured slate) is used."
         ),
     )

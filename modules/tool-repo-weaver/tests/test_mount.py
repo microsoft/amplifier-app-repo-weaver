@@ -24,8 +24,10 @@ if str(_MODULE_DIR) not in sys.path:
     sys.path.insert(0, str(_MODULE_DIR))
 
 # ---------------------------------------------------------------------------
-# Mock amplifier_core and repo_weaver before importing the module so that
-# tests can run without a full Amplifier installation.
+# Mock amplifier_core before importing the module so that tests can run
+# without a full Amplifier installation.  repo_weaver is now a real
+# installed package (wiki-weaver dep brings it in), so it does NOT need
+# a mock — importing it directly is both possible and preferable.
 # ---------------------------------------------------------------------------
 
 
@@ -38,12 +40,6 @@ class _MockToolResult:
 _mock_amplifier_core = MagicMock()
 _mock_amplifier_core.ToolResult = _MockToolResult
 sys.modules.setdefault("amplifier_core", _mock_amplifier_core)
-
-_mock_repo_weaver = MagicMock()
-_mock_repo_weaver.init = MagicMock(return_value=0)
-_mock_repo_weaver.weave = MagicMock(return_value=0)
-_mock_repo_weaver.ask = MagicMock(return_value=0)
-sys.modules.setdefault("repo_weaver", _mock_repo_weaver)
 
 # Now we can import the module under test.
 from amplifier_module_tool_repo_weaver import mount  # noqa: E402

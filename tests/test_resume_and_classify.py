@@ -26,6 +26,8 @@ from unittest.mock import patch
 
 import pytest
 
+from wiki_weaver.lib import wiki_failed, wiki_sources
+
 from repo_weaver.materialize import _build_change_digest
 from repo_weaver.weave import (
     _load_replay_progress,
@@ -76,9 +78,10 @@ def main() -> int:
 
     corpus = Path(wiki)
     inbox = corpus / "_inbox"
-    archive = corpus / "_archive"
+    archive = corpus / "_sources"
+    (corpus / ".wiki").mkdir(exist_ok=True)
     archive.mkdir(exist_ok=True)
-    (corpus / "_failed").mkdir(exist_ok=True)
+    (corpus / ".wiki" / "failed").mkdir(exist_ok=True)
 
     call_log = corpus / ".fake-ww-calls.jsonl"
     paths = [inbox / source] if source else sorted(inbox.glob("*.md"))
@@ -167,8 +170,9 @@ def _init_git_repo(path: Path) -> str:
 def _setup_corpus(tmp_path: Path) -> Path:
     corpus = tmp_path / "corpus"
     corpus.mkdir()
-    for sub in ("_inbox", "_archive", "_failed"):
-        (corpus / sub).mkdir()
+    (corpus / "_inbox").mkdir()
+    wiki_sources(corpus).mkdir(parents=True, exist_ok=True)
+    wiki_failed(corpus).mkdir(parents=True, exist_ok=True)
     return corpus
 
 
@@ -298,9 +302,9 @@ def test_replay_failed_source_reattempted_on_resume(tmp_path, fake_ww_env):
     _init_git_repo(repo)
     corpus = _setup_corpus(tmp_path)
 
-    # Simulate a source left in _failed/ from a prior run.
+    # Simulate a source left in .wiki/failed/ from a prior run.
     old_failed_name = "2023-06-15-old-digest.md"
-    (corpus / "_failed" / old_failed_name).write_text(
+    (wiki_failed(corpus) / old_failed_name).write_text(
         "# stranded from prior run\n", encoding="utf-8"
     )
 
@@ -318,9 +322,9 @@ def test_replay_failed_source_reattempted_on_resume(tmp_path, fake_ww_env):
     assert rc == 0, f"Expected rc=0, got {rc}"
 
     # The old failed source must have been retried and archived.
-    assert (corpus / "_archive" / old_failed_name).exists(), (
+    assert (wiki_sources(corpus) / old_failed_name).exists(), (
         f"Stranded source {old_failed_name!r} was not re-attempted and archived. "
-        f"_archive/ contains: {[p.name for p in (corpus / '_archive').iterdir()]}"
+        f"_sources/ contains: {[p.name for p in wiki_sources(corpus).iterdir()]}"
     )
 
     # Window must now be in the progress file.
@@ -350,9 +354,9 @@ def test_weave_multi_skips_archived_repo(tmp_path, fake_ww_env):
 
     until = "2024-01-01"
 
-    # Simulate repo-a's change digest already archived from a prior run.
+    # Simulate repo-a's change digest already in _sources/ from a prior run.
     archived_name = f"repo-a-{until}-changes.md"
-    (corpus / "_archive" / archived_name).write_text(
+    (wiki_sources(corpus) / archived_name).write_text(
         "# archived from prior run\n", encoding="utf-8"
     )
 

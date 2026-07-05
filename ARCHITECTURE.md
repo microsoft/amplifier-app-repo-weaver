@@ -20,12 +20,19 @@ direct LLM / model API calls** — it is deterministic plumbing plus an authored
 | Does | Ingests, reconciles, cites, weaves concept pages, answers queries, builds HTML dashboards | Adapts git → source docs, orchestrates weaves, grades output, builds repo-flavoured dashboards |
 | Knows about git? | No — domain-agnostic | Yes — this is its whole job |
 
-repo-weaver **never imports** wiki-weaver (`dependencies = []`). The boundary is a
-process boundary, crossed only via subprocess:
+The boundary is **two-layered**:
 
-- Every synthesis is `subprocess.run(["wiki-weaver", "ingest", ...])` — `weave.py:~533`
-- Every query is `subprocess.run(["wiki-weaver", "ask", ...])` — `cli.py:~284`
-- Every dashboard build is `subprocess.run(["wiki-weaver", "build-dashboard", ..., "--group-by", "repos", "--group-link-template", "https://github.com/{group}"])` — `cli.py:cmd_build_dashboard`
+1. **LLM boundary (subprocess)** — repo-weaver makes zero direct LLM calls.  All
+   synthesis, query, and dashboard work crosses via subprocess:
+   - Every synthesis: `subprocess.run(["wiki-weaver", "ingest", ...])` — `weave.py:~533`
+   - Every query: `subprocess.run(["wiki-weaver", "ask", ...])` — `cli.py:~284`
+   - Every dashboard: `subprocess.run(["wiki-weaver", "build-dashboard", ..., "--group-by", "repos", "--group-link-template", "https://github.com/{group}"])` — `cli.py:cmd_build_dashboard`
+
+2. **Path-constants import** — `wiki_weaver.lib` path helpers (`wiki_ledger`, `wiki_failed`,
+   `wiki_sources`, `wiki_inbox`, `wiki_dashboard`) are imported directly so the two repos
+   share a single source of truth for corpus layout.  This import is **non-LLM**: it only
+   accesses pure-Python string constants and `pathlib.Path` arithmetic.  All heavy deps
+   (model clients, attractor engine) are never touched at import time.
 
 ![Architecture](docs/architecture.png)
 
@@ -65,7 +72,7 @@ dedup, fetch-or-warn staleness check.
 `--group-link-template 'https://github.com/{group}'` (repo group headers become
 GitHub links). A packaged default theme (`repo_weaver/themes/default.json`,
 GitHub-flavoured slate accent) is seeded idempotently into the corpus's
-`.wiki-dashboard/theme.json` on first run.
+`.wiki/dashboard/theme.json` on first run.
 
 ### `eval/` (~1,350 LOC) — deterministic eval harness
 

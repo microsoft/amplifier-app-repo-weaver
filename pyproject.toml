@@ -7,13 +7,15 @@ name = "repo-weaver"
 version = "0.1.0"
 description = "Turn a git repo's commits + PRs into a queryable knowledge corpus via wiki-weaver."
 requires-python = ">=3.11"
-# No PyPI runtime dependencies — repo-weaver shells out to external binaries rather
-# than importing them.  The required EXTERNAL runtime tools are:
-#   wiki-weaver  — the ingest/ask engine (pip install wiki-weaver  OR  uv tool install wiki-weaver)
-#   git          — standard SCM; must be on PATH
-#   gh           — GitHub CLI (https://cli.github.com/); must be on PATH and authenticated
+# wiki-weaver is a REAL dependency: repo-weaver imports its path constants (the single
+# source of truth for corpus layout) AND shells out to its CLI for ingest/ask/dashboard.
+# It is not published to PyPI, so it is pinned to @main via a PEP 508 git URL — the same
+# model wiki-weaver uses for its own git deps.
+# Other EXTERNAL runtime tools (shelled, not imported): git, gh (GitHub CLI).
 # Run `repo-weaver doctor` to verify all external tools are present and configured.
-dependencies = []
+dependencies = [
+    "wiki-weaver @ git+https://github.com/microsoft/amplifier-app-wiki-weaver@main",
+]
 readme = "README.md"
 license = { text = "MIT" }
 
@@ -28,3 +30,13 @@ repo-weaver = "repo_weaver.cli:main"
 # wheel automatically alongside the Python source.  Works for both editable and
 # non-editable (uv tool install) installs.
 packages = ["repo_weaver"]
+
+[tool.hatch.metadata]
+# Required so hatchling will build a wheel whose dependencies use a direct git URL
+# (the `wiki-weaver @ git+...` pin above). Same setting wiki-weaver uses for its own git deps.
+allow-direct-references = true
+
+[dependency-groups]
+dev = [
+    "pytest-asyncio>=1.4.0",
+]
