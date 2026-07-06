@@ -9,6 +9,7 @@ Usage:
     repo-weaver weave --corpus DIR [options]
     repo-weaver ask "<question>" --corpus DIR [--json]
     repo-weaver replay --corpus DIR --windows "D1,D2,..." [options]
+    repo-weaver sync --corpus DIR [options]
     repo-weaver build-dashboard <corpus> --out PATH [--theme PATH]
 """
 
@@ -27,7 +28,11 @@ from typing import Optional
 from wiki_weaver.lib import wiki_dashboard
 
 from . import gitio
+from .sync import sync_corpus
 from .weave import _DEFAULT_MAX_CYCLES, _DEFAULT_MAX_RETRIES, _POLICY_SCHEMA
+
+# Default location for repo clones ensured/used by `repo-weaver sync`.
+_DEFAULT_SYNC_CLONES_DIR = "~/dev/amplifier-corpus-clones"
 
 # Default theme shipped with repo-weaver — written to a corpus's
 # .wiki/dashboard/theme.json on first build-dashboard run (idempotent).
@@ -329,6 +334,59 @@ def cmd_replay(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Subcommand: sync
+# ---------------------------------------------------------------------------
+
+
+def cmd_sync(args: argparse.Namespace) -> int:
+    """Detect changed/tracked repos since the corpus's last sync and re-weave them.
+
+    Thin CLI wrapper over :func:`repo_weaver.sync.sync_corpus` — see that
+    function's docstring for the full detection + weave algorithm.
+    """
+    try:
+        result = sync_corpus(
+            corpus=args.corpus,
+            clones_dir=args.clones_dir,
+            since=args.since,
+            until=args.until,
+            dry_run=args.dry_run,
+            max_modules=args.max_modules,
+        )
+    except ValueError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+
+    changed = result["changed"]
+    print(f"[repo-weaver] Last sync: {result['last_sync']}  ->  {result['until']}")
+    print(f"[repo-weaver] Tracked owners checked: {len(result['owners'])}")
+    for err in result["errors"]:
+        print(f"[repo-weaver] WARNING: {err}", file=sys.stderr)
+
+    if not changed:
+        print("[repo-weaver] No tracked repos changed since last sync.")
+        return 0
+
+    print(f"[repo-weaver] Changed: {len(changed)} repo(s)")
+    for entry in changed:
+        print(f"  - {entry['nameWithOwner']}  (pushed {entry['pushedAt']})")
+
+    if args.dry_run:
+        print("\n[repo-weaver] dry-run complete — no clones made, nothing woven.")
+        return 0
+
+    woven = result.get("woven", [])
+    failed = result.get("failed", [])
+    print(f"\n[repo-weaver] Woven: {len(woven) - len(failed)}/{len(changed)} succeeded")
+    if failed:
+        print(f"[repo-weaver] FAILED: {len(failed)} repo(s):", file=sys.stderr)
+        for name in failed:
+            print(f"  - {name}", file=sys.stderr)
+        return 1
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # Subcommand: build-dashboard
 # ---------------------------------------------------------------------------
 
@@ -622,6 +680,58 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     p.set_defaults(func=cmd_replay)
+
+    # ---- sync ----
+    p = sub.add_parser(
+        "sync",
+        help=(
+            "Detect tracked repos that changed since the corpus's last sync "
+            "(via `gh`, no cloning needed for detection) and re-weave them."
+        ),
+    )
+    p.add_argument("--corpus", required=True, metavar="DIR", help="Corpus directory.")
+    p.add_argument(
+        "--clones-dir",
+        metavar="PATH",
+        default=_DEFAULT_SYNC_CLONES_DIR,
+        help=(
+            "Directory to hold/locate local clones of changed repos, one "
+            f"subdirectory per repo (default: {_DEFAULT_SYNC_CLONES_DIR}). "
+            "'~' is expanded."
+        ),
+    )
+    p.add_argument(
+        "--since",
+        metavar="YYYY-MM-DD",
+        default=None,
+        help=(
+            "Override the detected last-sync date (exclusive). Default: the "
+            "max YYYY-MM-DD parsed across the corpus's _sources/*-changes.md "
+            "filenames."
+        ),
+    )
+    p.add_argument(
+        "--until",
+        metavar="YYYY-MM-DD",
+        default=None,
+        help="Window end (inclusive). Default: today.",
+    )
+    p.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Detect and print the changed-repo list only; clone/weave nothing.",
+    )
+    p.add_argument(
+        "--max-modules",
+        type=int,
+        default=0,
+        metavar="N",
+        help=(
+            "Max module snapshot documents to emit per changed repo (default: 0 "
+            "— changes-only, matching a fast-sync run)."
+        ),
+    )
+    p.set_defaults(func=cmd_sync)
 
     # ---- build-dashboard ----
     p = sub.add_parser(
