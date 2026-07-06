@@ -333,6 +333,55 @@ def gh_merged_prs(
     return result, None
 
 
+def gh_list_repos(owner: str) -> list[dict[str, object]]:
+    """Return repo metadata for every non-archived repo owned by *owner*.
+
+    Shells out to::
+
+        gh repo list <owner> --json name,isFork,pushedAt,nameWithOwner \\
+            --limit 500 --no-archived
+
+    Each returned dict has (at least) the keys ``name``, ``isFork``,
+    ``pushedAt`` (ISO 8601 string), and ``nameWithOwner`` (``"owner/repo"``).
+
+    Returns an empty list if ``gh`` exits non-zero or produces unparsable
+    output. This is a thin, best-effort subprocess wrapper (same shape as
+    :func:`gh_merged_prs`'s success path) — callers that need to distinguish
+    "owner has zero repos" from "gh failed" should cross-check against other
+    signals (e.g. whether repos were expected for that owner).
+    """
+    cmd = [
+        "gh",
+        "repo",
+        "list",
+        owner,
+        "--json",
+        "name,isFork,pushedAt,nameWithOwner",
+        "--limit",
+        "500",
+        "--no-archived",
+    ]
+    r = _run(cmd)
+    if r.returncode != 0 or not r.stdout.strip():
+        return []
+    try:
+        repos: list[dict[str, object]] = json.loads(r.stdout)
+    except json.JSONDecodeError:
+        return []
+    return repos
+
+
+def gh_clone_repo(name_with_owner: str, dest: str) -> bool:
+    """Clone ``owner/repo`` into *dest* via ``gh repo clone``.
+
+    Returns True on success (exit 0), False otherwise. Side-effecting: creates
+    a new local clone. Callers (e.g. :func:`repo_weaver.sync.sync_corpus`)
+    should call this only when no local clone exists yet at *dest*.
+    """
+    r = _run(["gh", "repo", "clone", name_with_owner, dest])
+    return r.returncode == 0
+
+
 # ---------------------------------------------------------------------------
 # Clone-staleness helpers  (Change 4: fetch-or-warn guard)
 # ---------------------------------------------------------------------------

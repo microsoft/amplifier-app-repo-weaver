@@ -74,6 +74,18 @@ GitHub links). A packaged default theme (`repo_weaver/themes/default.json`,
 GitHub-flavoured slate accent) is seeded idempotently into the corpus's
 `.wiki/dashboard/theme.json` on first run.
 
+### `repo_weaver/sync.py` (~300 LOC) — deterministic change-detection glue
+
+`sync_corpus()` (wired to `repo-weaver sync`) needs **no manual repo list**: it
+recovers the last-sync date and the tracked `(owner, repo)` set directly from
+the `owner__repo-YYYY-MM-DD-changes.md` filenames already in `_sources/`, asks
+GitHub (`gh repo list`, via the new `gitio.gh_list_repos` helper) which of
+those repos pushed since, ensures a local clone under `--clones-dir` (`gh repo
+clone` or `git fetch`, via the new `gitio.gh_clone_repo` helper), and re-weaves
+each changed repo through the existing single-repo `weave()` path. It adds no
+new orchestration engine and no `.dot` pipeline — it is glue over `weave.py`
+and `gitio.py`, matching repo-weaver's zero-direct-LLM-calls stance.
+
 ### `eval/` (~1,350 LOC) — deterministic eval harness
 
 - `grade.py` — ontology / weave metrics.
