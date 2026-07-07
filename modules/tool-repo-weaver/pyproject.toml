@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "amplifier-module-tool-repo-weaver"
 version = "0.1.0"
-description = "Amplifier tool module: exposes repo-weaver commands (init, weave, ask) as mountable tools in an AmplifierSession."
+description = "Amplifier tool module: exposes repo-weaver commands (init, weave, ask, sync, discover) as mountable tools in an AmplifierSession."
 requires-python = ">=3.11"
 license = { text = "MIT" }
 # repo-weaver is a PEER dependency — the bundle root's pyproject.toml declares the

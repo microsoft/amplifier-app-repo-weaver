@@ -1,0 +1,55 @@
+# repo-weaver-sync.resolver.yaml
+#
+# Sidecar manifest for repo-weaver-sync.dot. Declares this pipeline to the
+# dot-graph resolver so it appears in the Resolve UI picker with a typed form.
+# Sibling to repo-weaver-smoke.resolver.yaml -- same sidecar format, a
+# different scenario (multi-repo, unattended/scheduled sync + discovery
+# instead of a single-repo bootstrap).
+#
+# Discovery: drop both this file and repo-weaver-sync.dot into
+#   src/amplifier_resolver_dot_graph/pipelines/
+# inside the installed amplifier-resolver-dot-graph package, then restart
+# the backend (or amplifier-resolve restart in DTU dev mode).
+#
+# Params are seeded into the pipeline engine's context at dispatch time.
+# The engine substitutes $task, $rules_file, $clones_dir, $max_modules into
+# the DOT before execution. The `default` field also causes the UI to
+# pre-fill the form field AND acts as a layer-2 fallback for direct API/CLI
+# callers that bypass the UI. Shell-level fallbacks (${clones_dir:-...}) in
+# tool_command lines are the layer-1 floor and work regardless of invocation
+# path.
+#
+# NOTE: unlike repo-weaver-smoke.resolver.yaml, this manifest intentionally
+# has no since/until params -- see repo-weaver-sync.dot's header comment for
+# why passing a global --since would defeat the per-repo watermark fix that
+# `sync` exists for. Omit them here too, for the same reason.
+
+name: "Repo Weaver — Sync"
+description: >
+  Multi-repo, unattended/scheduled repo-weaver pipeline: env doctor check ->
+  discover repos matching the caller's own rules (mechanism only, policy
+  stays with the caller) -> re-weave tracked repos that changed since each
+  repo's own last sync -> ask a question against the refreshed corpus.
+  Fails loud if repo-weaver / wiki-weaver are not on PATH, the LLM API key
+  is absent, --rules-file is missing/invalid, or a gh discovery/weave step
+  genuinely fails. Requires an already-woven corpus at .ai/corpus in the
+  repo the resolver has cloned into /project/workspace/ (bootstrap first
+  via repo-weaver-smoke.dot or an equivalent manual init + weave).
+pipeline: repo-weaver-sync.dot
+params:
+  task:
+    input: longText
+    label: "Question / scope"
+    required: true
+  rules_file:
+    input: text
+    label: "Discovery rules file (path, JSON list of rule objects)"
+    default: ".ai/discovery-rules.json"
+  clones_dir:
+    input: text
+    label: "Local clones directory for synced repos"
+    default: "~/dev/amplifier-corpus-clones"
+  max_modules:
+    input: text
+    label: "Max module snapshot docs per changed repo (0 = changes-only)"
+    default: "0"

@@ -1,0 +1,128 @@
+// repo-weaver-sync.dot — Multi-repo, unattended/scheduled repo-weaver pipeline.
+//
+// Sibling to repo-weaver-smoke.dot, NOT a replacement or a per-command
+// pipeline. repo-weaver's core logic is deterministic Python -- a weaker
+// fit for .dot pipelines than wiki-weaver's per-command graphs -- so its
+// L1 artifacts exist to prove a SCENARIO runs end-to-end through the
+// Amplifier Resolve dot-graph resolver, not to give every CLI subcommand
+// its own node. smoke.dot proves the single-repo scenario (bootstrap a
+// corpus from one repo, then ask). This file proves the DIFFERENT
+// scenario `sync`/`discover` exist for: an already-tracked, multi-repo
+// corpus, refreshed on a schedule, with discovery of new repos layered
+// on top via a caller-owned rules file.
+//
+// Fail-loud convention (resolver-correct, same as smoke.dot):
+//   parallelogram nodes run tool_command via subprocess. A non-zero exit
+//   code fails the node and halts the pipeline immediately -- no silent
+//   green, no retry loop swallows the error. No explicit "fail" routing
+//   is needed; the engine's exit-code->FAIL path IS the fail-loud path.
+//
+// CWD for ALL tool_command nodes: /project/workspace/ (the cloned repo
+// the resolver checked out for THIS pipeline run -- e.g. the caller's own
+// orchestrator repo, such as Team Pulse's). That repo is where `.ai/corpus`
+// (the wiki-weaver corpus) and `.ai/discovery-rules.json` (the caller-owned
+// discovery policy) live. The OTHER repos that `sync` clones, tracks, and
+// re-weaves live under `--clones-dir`, entirely separate from this workspace.
+//
+// Precondition (deliberate, matches repo-weaver's own contract): `.ai/corpus`
+// must already exist with at least one previously-woven, tracked repo before
+// this pipeline runs. `sync_corpus()` raises on a never-woven corpus by
+// design (see sync.py:252-256) -- there is no per-repo watermark to recover
+// a "since" from yet. Bootstrapping a corpus from zero is smoke.dot's job
+// (init + weave); this pipeline's job is the ongoing refresh, which is a
+// genuinely different scenario with a genuinely different precondition.
+//
+// Variable substitution (attractor engine, same style as smoke.dot):
+//   $task, $rules_file, $clones_dir, $max_modules -- seeded from
+//   resolver.yaml params at dispatch. ${clones_dir:-...} syntax = shell
+//   default fallback inside the engine; safe even when invoked via
+//   `attractor run` CLI without the resolver.
+//
+// Deliberate omission: --since/--until are NOT passed to `repo-weaver sync`
+// below. `sync`'s whole reason to exist is the per-repo watermark fix --
+// each tracked repo is compared against ITS OWN last-sync date, recovered
+// from the corpus's own `_sources/*-changes.md` filenames. Forcing a single
+// global --since default (the way smoke.dot forces one for its one-shot
+// `weave`) would silently defeat that fix for a multi-repo scheduled run.
+// Omitting the flags lets `sync`'s own auto-detection run, which is the
+// correct default for this scenario. Set them manually via `attractor run`
+// overrides only for a deliberate, informed one-off override.
+//
+// Node-type discipline (same as smoke.dot):
+//   shape=Mdiamond   -> start handler    (pipeline entry)
+//   shape=Msquare    -> exit handler     (pipeline exit)
+//   shape=parallelogram -> tool handler  (deterministic shell; fail-loud)
+//   shape=box (default) -> codergen/LLM  (Amplifier child session + tools)
+
+digraph RepoWeaverSync {
+    graph [
+        label="Repo Weaver — Sync",
+        goal="$task",
+        rankdir=LR,
+        default_max_retry=1,
+        default_fidelity="truncate"
+    ]
+
+    start [shape=Mdiamond]
+    done  [shape=Msquare]
+
+    // Step 1 — Env preflight. Same doctor node as smoke.dot: checks
+    // repo-weaver/wiki-weaver on PATH, API key present, any other deps.
+    // Non-zero exit HALTS the pipeline -- nothing runs with broken deps.
+    doctor [
+        shape=parallelogram,
+        label="Doctor",
+        tool_command="repo-weaver doctor"
+    ]
+
+    // Step 2 — Discover repos matching the CALLER's own rules (mechanism
+    // only -- repo-weaver does not own, parse, or validate a discovery
+    // config schema; see cmd_discover's docstring in cli.py). The rules
+    // file is authored and committed by the caller (e.g. Team Pulse's own
+    // tracked-owners policy); default path assumes it's checked into this
+    // workspace repo at .ai/discovery-rules.json.
+    // Non-zero exit means either a bad --rules-file (missing/invalid JSON)
+    // or a genuine gh error for one of the rule owners -- both halt the
+    // pipeline rather than silently proceeding with a partial repo list.
+    discover [
+        shape=parallelogram,
+        label="Discover",
+        tool_command="repo-weaver discover --rules-file ${rules_file:-.ai/discovery-rules.json} --json > .ai/discovered.json && printf 'discover-ok'"
+    ]
+
+    // Step 3 — Re-weave tracked repos that changed since EACH repo's own
+    // last sync (the per-repo watermark correctness fix). See the header
+    // comment above for why --since/--until are intentionally absent here.
+    // Non-zero exit means a genuine gh discovery failure for a tracked
+    // owner, or a repo that failed to weave -- see _sync_exit_code in
+    // cli.py for the exact contract this relies on.
+    sync [
+        shape=parallelogram,
+        label="Sync",
+        tool_command="repo-weaver sync --corpus .ai/corpus --clones-dir ${clones_dir:-~/dev/amplifier-corpus-clones} --max-modules ${max_modules:-0} --json > .ai/sync-result.json && printf 'sync-ok'"
+    ]
+
+    // Step 4 — Query the corpus (LLM agent, full Amplifier session + tools).
+    // Mirrors smoke.dot's ask node exactly -- proves the corpus that
+    // discover+sync just refreshed is actually queryable afterward, not
+    // just "the commands exited zero".
+    // NOTE: $task is expanded by the engine before the LLM sees the prompt.
+    // A task containing a literal double-quote would break the inner command
+    // quoting -- use plain questions without embedded quotes (same
+    // limitation as smoke.dot's $task and wiki-query.dot's $question).
+    ask [
+        label="Ask",
+        llm_provider="anthropic",
+        llm_model="claude-sonnet-4-6",
+        timeout="300s",
+        prompt="You are running repo-weaver ask as an automated, unattended pipeline node. Your task:\\n\\n  $task\\n\\nSteps:\\n(1) Run this command via bash: repo-weaver ask \"$task\" --corpus .ai/corpus\\n(2) Capture the full output (the cited answer).\\n(3) Write the complete answer to .ai/answer.md using write_file or bash redirection.\\n(4) End with a non-empty one-line summary of what the answer covers."
+    ]
+
+    // Linear flow. Non-zero exits on tool nodes provide all necessary fail-loud
+    // semantics -- no explicit failure routing required.
+    start -> doctor
+    doctor -> discover
+    discover -> sync
+    sync -> ask
+    ask -> done
+}
