@@ -11,10 +11,12 @@ requests a freshness check (i.e. when ``--no-fetch`` is not set).
 
 from __future__ import annotations
 
+import fnmatch
 import json
 import re
 import subprocess
-from typing import Optional
+import time
+from typing import Callable, Optional
 
 
 # ---------------------------------------------------------------------------
@@ -30,6 +32,41 @@ def _run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
         text=True,
         encoding="utf-8",
     )
+
+
+# Retry configuration for `gh` CLI calls specifically (not plain `git`).
+_GH_RETRY_MAX_ATTEMPTS = 3
+_GH_RETRY_BASE_DELAY = 1.0  # seconds; doubles each attempt (1s, 2s, 4s)
+
+
+def _run_gh_with_retry(
+    cmd: list[str],
+    max_attempts: int = _GH_RETRY_MAX_ATTEMPTS,
+    base_delay: float = _GH_RETRY_BASE_DELAY,
+    _sleep: Optional[Callable[[float], None]] = None,
+) -> subprocess.CompletedProcess[str]:
+    """Run a ``gh`` CLI command, retrying non-zero exits with exponential back-off.
+
+    Up to *max_attempts* attempts (default 3), waiting *base_delay* seconds
+    before the first retry and doubling each subsequent attempt (1s, 2s, 4s
+    by default). Any non-zero exit is treated as potentially transient
+    (network blip, rate-limit) and retried -- `gh`'s own error text is not
+    parsed to decide retry-worthiness; that classification would be fragile
+    and the cost of one extra retry on a genuinely permanent error (bad auth,
+    404) is small compared to silently failing a scheduled/unattended run.
+
+    Never swallows a failure: if every attempt fails, the LAST attempt's
+    ``CompletedProcess`` (non-zero returncode, real stderr) is returned as-is
+    so callers see the true failure, not a fabricated success.
+    """
+    sleep_fn = _sleep if _sleep is not None else time.sleep
+    result = _run(cmd)
+    attempt = 1
+    while result.returncode != 0 and attempt < max_attempts:
+        sleep_fn(base_delay * (2 ** (attempt - 1)))
+        result = _run(cmd)
+        attempt += 1
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -300,7 +337,7 @@ def gh_merged_prs(
         "--limit",
         str(fetch_limit),
     ]
-    r = _run(cmd)
+    r = _run_gh_with_retry(cmd)
     if r.returncode != 0:
         # gh FAILED — extract the first line of stderr as the reason
         raw_err = (r.stderr or r.stdout or "").strip()
@@ -333,22 +370,40 @@ def gh_merged_prs(
     return result, None
 
 
-def gh_list_repos(owner: str) -> list[dict[str, object]]:
+def gh_list_repos(
+    owner: str,
+    include_forks: bool = True,
+    visibility: str = "all",
+) -> tuple[list[dict[str, object]], Optional[str]]:
     """Return repo metadata for every non-archived repo owned by *owner*.
 
     Shells out to::
 
         gh repo list <owner> --json name,isFork,pushedAt,nameWithOwner \\
-            --limit 500 --no-archived
+            --limit 500 --no-archived [--visibility public|private]
 
     Each returned dict has (at least) the keys ``name``, ``isFork``,
     ``pushedAt`` (ISO 8601 string), and ``nameWithOwner`` (``"owner/repo"``).
 
-    Returns an empty list if ``gh`` exits non-zero or produces unparsable
-    output. This is a thin, best-effort subprocess wrapper (same shape as
-    :func:`gh_merged_prs`'s success path) — callers that need to distinguish
-    "owner has zero repos" from "gh failed" should cross-check against other
-    signals (e.g. whether repos were expected for that owner).
+    Args:
+        owner:         A GitHub user or org login.
+        include_forks: When False, forked repos (``isFork: true``) are
+                       filtered out of the result client-side. Default True
+                       (matches prior behaviour: no filtering).
+        visibility:    ``"public"``, ``"private"``, or ``"all"`` (default).
+                       Anything other than ``"all"`` is passed through to
+                       ``gh repo list --visibility`` so results are filtered
+                       server-side against what the authenticated token can see.
+
+    Returns a ``(repos, error)`` tuple, mirroring :func:`gh_merged_prs`'s shape:
+
+    * ``(repos, None)`` -- gh ran successfully; *repos* may be an empty list
+                          when the owner genuinely has zero matching repos.
+    * ``([], error)``   -- gh exited non-zero (after retries) or produced
+                          unparsable output; the *error* string carries a
+                          human-readable reason. Callers **must** surface
+                          this loudly rather than silently treating it as
+                          "owner has zero repos".
     """
     cmd = [
         "gh",
@@ -361,14 +416,32 @@ def gh_list_repos(owner: str) -> list[dict[str, object]]:
         "500",
         "--no-archived",
     ]
-    r = _run(cmd)
-    if r.returncode != 0 or not r.stdout.strip():
-        return []
+    if visibility in ("public", "private"):
+        cmd += ["--visibility", visibility]
+
+    r = _run_gh_with_retry(cmd)
+    if r.returncode != 0:
+        raw_err = (r.stderr or r.stdout or "").strip()
+        first_line = (
+            raw_err.splitlines()[0][:200]
+            if raw_err
+            else "gh exited non-zero with no message"
+        )
+        return [], f"gh error: {first_line}"
+
+    if not r.stdout.strip():
+        # gh succeeded but returned nothing -- genuinely zero repos.
+        return [], None
+
     try:
         repos: list[dict[str, object]] = json.loads(r.stdout)
-    except json.JSONDecodeError:
-        return []
-    return repos
+    except json.JSONDecodeError as exc:
+        return [], f"gh error: could not parse JSON response ({exc})"
+
+    if not include_forks:
+        repos = [r for r in repos if not r.get("isFork")]
+
+    return repos, None
 
 
 def gh_clone_repo(name_with_owner: str, dest: str) -> bool:
@@ -378,8 +451,87 @@ def gh_clone_repo(name_with_owner: str, dest: str) -> bool:
     a new local clone. Callers (e.g. :func:`repo_weaver.sync.sync_corpus`)
     should call this only when no local clone exists yet at *dest*.
     """
-    r = _run(["gh", "repo", "clone", name_with_owner, dest])
+    r = _run_gh_with_retry(["gh", "repo", "clone", name_with_owner, dest])
     return r.returncode == 0
+
+
+# ---------------------------------------------------------------------------
+# Discovery mechanism (NOT policy) -- caller supplies the rule list
+# ---------------------------------------------------------------------------
+
+
+def discover_repos(
+    rules: list[dict[str, object]],
+) -> tuple[list[dict[str, object]], list[str]]:
+    """Discover repos across multiple owners/rules, merged and deduplicated.
+
+    This is a MECHANISM, not a policy: repo-weaver does not own, parse, or
+    validate a discovery config file -- the caller supplies *rules* directly
+    (e.g. loaded from their own JSON file, or built up in memory) each time.
+    Each rule is a dict with keys:
+
+        owner:         str  -- a GitHub user or org login (required).
+        match:         str  -- a glob/prefix pattern, e.g. ``"amplifier*"``
+                                (required; matched via :func:`fnmatch.fnmatch`
+                                against the repo's ``name``).
+        include_forks: bool -- default True.
+        visibility:    str  -- ``"public"`` / ``"private"`` / ``"all"``
+                                (default ``"all"``).
+
+    For each rule, calls :func:`gh_list_repos` with that rule's
+    ``include_forks``/``visibility``, then filters the result by ``match``.
+    Matched repos from all rules are merged into one list, deduplicated by
+    ``nameWithOwner`` (first occurrence wins).
+
+    A failing rule (gh discovery error for that owner) does NOT abort
+    discovery of the others -- mirrors :func:`repo_weaver.sync.sync_corpus`'s
+    "collect failures per repo/owner, keep going" pattern. Errors are
+    collected and returned alongside the matched repos.
+
+    Returns:
+        ``(matched_repos, errors)`` -- *matched_repos* is the deduplicated,
+        filtered list; *errors* is a list of human-readable per-rule failure
+        strings (empty when every rule's ``gh`` call succeeded).
+    """
+    matched: list[dict[str, object]] = []
+    seen: set[str] = set()
+    errors: list[str] = []
+
+    for rule in rules:
+        owner = str(rule.get("owner", ""))
+        match = str(rule.get("match", "*"))
+        include_forks = bool(rule.get("include_forks", True))
+        visibility = str(rule.get("visibility", "all"))
+
+        if not owner:
+            errors.append("discovery rule missing required 'owner' key; skipped.")
+            continue
+
+        repos, error = gh_list_repos(
+            owner, include_forks=include_forks, visibility=visibility
+        )
+        if error is not None:
+            errors.append(f"{owner}: {error}")
+            continue
+
+        for repo in repos:
+            name = repo.get("name")
+            if not isinstance(name, str) or not name:
+                continue
+            if not fnmatch.fnmatch(name, match):
+                continue
+            name_with_owner_raw = repo.get("nameWithOwner")
+            name_with_owner = (
+                name_with_owner_raw
+                if isinstance(name_with_owner_raw, str) and name_with_owner_raw
+                else f"{owner}/{name}"
+            )
+            if name_with_owner in seen:
+                continue
+            seen.add(name_with_owner)
+            matched.append(repo)
+
+    return matched, errors
 
 
 # ---------------------------------------------------------------------------

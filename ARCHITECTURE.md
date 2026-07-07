@@ -74,17 +74,46 @@ GitHub links). A packaged default theme (`repo_weaver/themes/default.json`,
 GitHub-flavoured slate accent) is seeded idempotently into the corpus's
 `.wiki/dashboard/theme.json` on first run.
 
-### `repo_weaver/sync.py` (~300 LOC) — deterministic change-detection glue
+### `repo_weaver/sync.py` (~380 LOC) — deterministic change-detection glue
 
 `sync_corpus()` (wired to `repo-weaver sync`) needs **no manual repo list**: it
-recovers the last-sync date and the tracked `(owner, repo)` set directly from
-the `owner__repo-YYYY-MM-DD-changes.md` filenames already in `_sources/`, asks
-GitHub (`gh repo list`, via the new `gitio.gh_list_repos` helper) which of
-those repos pushed since, ensures a local clone under `--clones-dir` (`gh repo
-clone` or `git fetch`, via the new `gitio.gh_clone_repo` helper), and re-weaves
-each changed repo through the existing single-repo `weave()` path. It adds no
-new orchestration engine and no `.dot` pipeline — it is glue over `weave.py`
-and `gitio.py`, matching repo-weaver's zero-direct-LLM-calls stance.
+recovers each tracked repo's OWN last-sync date (and the tracked `(owner,
+repo)` set) directly from the `owner__repo-YYYY-MM-DD-changes.md` filenames
+already in `_sources/` -- **per repo**, not a single corpus-wide watermark, so
+one repo's more recent digest can never mask another repo's older one and
+hide its activity. An explicit `--since` still applies globally as an
+intentional caller override. `sync` asks GitHub (`gh repo list`, via
+`gitio.gh_list_repos`, which returns `(repos, error)` so a genuine `gh`
+failure -- auth, rate-limit, network, unparsable output -- is distinguishable
+from "gh succeeded, zero matching repos") which tracked repos pushed since
+their own last-sync date, ensures a local clone under `--clones-dir` (`gh repo
+clone` or `git fetch`, via `gitio.gh_clone_repo`), and re-weaves each changed
+repo through the existing single-repo `weave()` path over its own window.
+`gh` CLI calls (`gh_merged_prs`, `gh_list_repos`, `gh_clone_repo`) retry with
+exponential back-off (1s/2s/4s, 3 attempts) via `gitio._run_gh_with_retry` to
+harden unattended/scheduled runs against transient network blips. `sync
+--json` emits the structured result (changed repos, per-owner counts, errors,
+`discovery_failed`) for programmatic callers; a genuine discovery failure for
+any owner makes the CLI exit non-zero even if other owners succeeded, since
+the CHANGED list is incomplete for that owner (silent-stale trap otherwise).
+It adds no new orchestration engine and no `.dot` pipeline — it is glue over
+`weave.py` and `gitio.py`, matching repo-weaver's zero-direct-LLM-calls stance.
+
+### `gitio.discover_repos()` + `repo-weaver discover` — discovery MECHANISM, not policy
+
+`discover_repos(rules)` (`gitio.py`) and the `repo-weaver discover
+--rules-file PATH [--json]` CLI wrapper let a caller find repos across
+multiple owners/orgs via `gh`, WITHOUT repo-weaver owning or parsing a
+discovery-config schema. Each rule is a plain dict (`owner`, `match` glob,
+`include_forks`, `visibility`) supplied by the CALLER each invocation (e.g.
+loaded from the caller's own JSON file) -- policy (which owners, which
+match patterns, per-source fork/visibility rules) stays entirely with the
+caller. `gh_list_repos()` gained `include_forks` / `visibility` parameters so
+`discover_repos()` can apply different rules per owner (e.g. exclude forks
+for personal accounts, include them for an org) in one pass. A failing rule
+does not abort discovery of the others -- errors are collected and returned
+alongside the matched, deduplicated repo list, mirroring `sync_corpus()`'s
+"keep going, report failures" pattern.
 
 ### `eval/` (~1,350 LOC) — deterministic eval harness
 
@@ -161,3 +190,43 @@ All on repo-weaver's side of the boundary — **the engine was untouched**.
 3. **Incremental-weave qualifier** — fixes one-at-a-time weave collisions.
 4. **Repo-identity rules** — same-name ≠ same-repo.
 5. **Eval tracer version-normalize + trailer-strip** — groundedness tracing accuracy.
+
+
+## 8. Corpus directory layout (co-tenancy)
+
+A caller may want to point `--corpus` at a directory that also holds unrelated
+content (e.g. a shared vault also used for other purposes). This section lists
+EXACTLY what `weave` / `sync` / `build-dashboard` write directly under
+`<corpus>/`, verified against the code (not guessed), so a caller can safely
+co-locate other files without collision.
+
+Written by repo-weaver / wiki-weaver, directly under `<corpus>/`:
+
+| Path | Written by | Purpose |
+|---|---|---|
+| `_sources/` | wiki-weaver ingest (via repo-weaver's materialize step) | Archived, qualified change-digest + module-snapshot markdown files (`<owner>__<repo>-<until>-changes.md`, `module-<owner>__<repo>-<slug>-<until>.md`). `sync` and `weave`'s archive-skip / per-repo-watermark logic both read this directory's filenames as their only state. |
+| `_inbox/` | repo-weaver `materialize()` (via `weave()` / `weave_multi()`) | Transient staging: source documents written here before `wiki-weaver ingest` consumes them. Empty between runs in the steady state; non-empty only mid-run or after a crash (see `.wiki/failed/` below). |
+| `.repo-weaver.json` | repo-weaver `init()` | Corpus config: the list of registered local repo paths (`repos: [...]`, or legacy `repo: "..."` for pre-multi-repo corpora). |
+| `.replay-progress.json` | repo-weaver `replay_windows()` | Resume-from-checkpoint state for `repo-weaver replay` (set of completed `(since, until)` window keys). Safe to delete: deletion is equivalent to `--restart`. |
+| `policy/schema.md` | repo-weaver `init()` | The code-fit synthesis schema copied from the packaged `repo_weaver/policy/schema.md`, read by `wiki-weaver ingest`. |
+| `.wiki/` | wiki-weaver (all subpaths below) | wiki-weaver's own hidden state directory -- repo-weaver never writes here directly except via the `wiki_weaver.lib` path helpers it imports for consistency. |
+| `.wiki/.processed.jsonl` | wiki-weaver ingest | Append-only ledger of processed sources (read by repo-weaver's `_read_ledger_for_source()` to classify `.wiki/failed/` retries). |
+| `.wiki/.sources.json` | wiki-weaver ingest | wiki-weaver's own source registry. |
+| `.wiki/failed/` | wiki-weaver ingest | Sources that failed to converge; repo-weaver's `_retry_failed_sources()` drains this directory with classified retries (transient / not-converged / permanent). |
+| `.wiki/runs/` | wiki-weaver ingest | wiki-weaver's own per-run bookkeeping. |
+| `.wiki/policy/` | wiki-weaver (via `wiki_policy_dir`) | wiki-weaver's own policy storage (distinct from the top-level `policy/` written by repo-weaver's `init()`, above). |
+| `.wiki/dashboard/theme.json` | repo-weaver `_ensure_corpus_theme()` (via `build-dashboard`) | Idempotently seeded default theme (title + accent colour); never overwritten once present. Overridable per-run with `build-dashboard --theme PATH`. |
+
+**Not written under `--corpus` at all:**
+
+- The dashboard HTML output -- always caller-specified via `build-dashboard
+  --out PATH`, which may point anywhere (inside or outside the corpus dir).
+- Local repo clones managed by `sync` -- written under `--clones-dir`
+  (default `~/dev/amplifier-corpus-clones`), a SEPARATE directory from the
+  corpus entirely.
+
+**Practical guidance:** a caller who wants to co-locate unrelated content in
+the same directory as `--corpus` should avoid creating files/directories at
+the top level named `_sources`, `_inbox`, `.wiki`, `.repo-weaver.json`,
+`.replay-progress.json`, or `policy/` -- everything else at the corpus root is
+untouched by repo-weaver / wiki-weaver.
