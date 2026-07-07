@@ -287,8 +287,16 @@ def sync_corpus(
         return result
 
     # ---- Weave each changed repo over the reused single-repo weave path ----
+    # Success is determined empirically, not from the raw returncode: weave()
+    # (via wiki-weaver's own .wiki/failed/ retry mechanism) can recover from
+    # an initial subprocess failure -- e.g. an OOM-killed (-9) ingest whose
+    # source is later retried successfully -- and the returncode it reports
+    # can be stale relative to that recovery. Rather than trust it blindly,
+    # check whether the expected change-digest actually landed in _sources/;
+    # that file's presence is the ground truth for "this repo is woven".
     woven: list[dict[str, object]] = []
     weave_failures: list[str] = []
+    sources_dir = wiki_sources(corpus_path)
     for entry in changed:
         name_with_owner = entry["nameWithOwner"]
         clone_path = clone_paths[name_with_owner]
@@ -301,7 +309,12 @@ def sync_corpus(
             dry_run=False,
         )
         woven.append({"repo": name_with_owner, "returncode": rc})
-        if rc != 0:
+
+        expected_filename = (
+            f"{entry['owner']}__{entry['repo']}-{effective_until}-changes.md"
+        )
+        landed = (sources_dir / expected_filename).exists()
+        if not landed:
             weave_failures.append(name_with_owner)
 
     result["woven"] = woven

@@ -592,6 +592,22 @@ def _run_ingest_with_retry(
             file=sys.stderr,
         )
 
+    # Snapshot whether there is anything in .wiki/failed/ to retry BEFORE
+    # calling _retry_failed_sources (which drains it down to empty on
+    # success).  This lets us tell apart two scenarios that both yield
+    # retry_rc == 0:
+    #   (a) nothing was in .wiki/failed/ at all -- the initial rc, if
+    #       non-zero, reflects a failure the retry mechanism never saw
+    #       (e.g. a crash that produced no per-source failure artifacts),
+    #       so it must stand.
+    #   (b) sources WERE in .wiki/failed/ and every one was recovered --
+    #       the run's final state is success, even though the initial
+    #       subprocess exit code (e.g. -9 from an OOM kill) was non-zero.
+    failed_dir = wiki_failed(Path(corpus))
+    had_failures_to_retry = failed_dir.exists() and any(
+        p.is_file() for p in failed_dir.iterdir()
+    )
+
     retry_rc = _retry_failed_sources(
         corpus=corpus,
         max_retries=max_retries,
@@ -600,10 +616,16 @@ def _run_ingest_with_retry(
         _sleep=_sleep,
     )
 
-    # Retry result takes precedence: if every source was retried to success,
-    # return 0.  If there was nothing to retry, honour the initial rc.
     if retry_rc != 0:
+        # Retry ran and unresolved failures remain -- report that.
         return retry_rc
+    if had_failures_to_retry:
+        # Retry ran and fully recovered every source that failed: the final
+        # state is success, regardless of the stale initial exit code.
+        return 0
+    # Nothing was ever in .wiki/failed/ to retry: honour the initial rc
+    # as-is (covers the ordinary success case, and a failure mode that
+    # never produced per-source failure artifacts for retry to find).
     return initial_rc
 
 
