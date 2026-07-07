@@ -22,7 +22,7 @@ digraph leverage_levels {
   // ---------------- L2 ----------------
   l2_desc [label="L2 — Python lib\n(methods per command; AmplifierSession\n+ custom orchestrator runs the .dot files)", fillcolor="#f5f5f5", color="#999999"];
   l2_ww   [label="PRESENT\nlib.py + engine_runner", fillcolor="#d5e8d4", color="#82b366"];
-  l2_rw   [label="PRESENT\n__init__ exports public API:\ninit / weave / weave_multi /\nreplay_windows / ask / materialize", fillcolor="#d5e8d4", color="#82b366"];
+  l2_rw   [label="PRESENT\n__init__ exports public API:\ninit / weave / weave_multi /\nreplay_windows / ask / materialize /\nsync_corpus / discover_repos", fillcolor="#d5e8d4", color="#82b366"];
 
   // ---------------- L3 ----------------
   l3_desc [label="L3 — Amplifier tool modules\n(commands as agent-callable tools)", fillcolor="#f5f5f5", color="#999999"];

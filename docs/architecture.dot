@@ -22,10 +22,10 @@ digraph repo_weaver_architecture {
     style=filled; fillcolor="#eaf2fc"; color="#4a78b5"; penwidth=2;
     fontsize=13; fontname="Helvetica-Bold";
 
-    cli [label="cli.py\nthin CLI:\ninit / weave / ask /\nreplay / doctor /\nbuild-dashboard", shape=box];
-    weave [label="lib/weave.py\nweave · weave_multi · replay_windows\n(windowed, incremental/staggered, retry,\nstrand-rescue, dedup, fetch-or-warn)", shape=box];
+    cli [label="cli.py\nthin CLI:\ninit / weave / ask /\nreplay / doctor / sync /\ndiscover / build-dashboard", shape=box];
+    weave [label="lib/weave.py\nweave · weave_multi · replay_windows\n(windowed, incremental/staggered, retry,\nstrand-rescue, dedup, fetch-or-warn)\n+ sync.py: per-repo watermark replay", shape=box];
     materialize [label="lib/materialize.py\ngit history → source docs\n(change digests, Notable Commits,\nmodule snapshots, owner__repo files)", shape=box];
-    gitio [label="lib/gitio.py\ngit + gh plumbing\n(fetch / fast-forward staleness)", shape=box];
+    gitio [label="lib/gitio.py\ngit + gh plumbing\n(fetch / fast-forward staleness,\ngh retry/backoff, discover_repos())", shape=box];
     schema [label="policy/schema.md\nAUTHORED concept-primary\nsynthesis schema\n(attribution + repo-identity rules)", shape=note, fillcolor="#fff2cc", color="#d6b656"];
     eval [label="eval/  (NO LLM)\ngrade.py · trace_grounding.py\ncoverage_check.py", shape=box, fillcolor="#d5e8d4", color="#82b366"];
   }
