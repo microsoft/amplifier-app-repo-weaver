@@ -9,7 +9,8 @@ Usage:
     repo-weaver weave --corpus DIR [options]
     repo-weaver ask "<question>" --corpus DIR [--json]
     repo-weaver replay --corpus DIR --windows "D1,D2,..." [options]
-    repo-weaver sync --corpus DIR [options]
+    repo-weaver sync --corpus DIR [options] [--json]
+    repo-weaver discover --rules-file PATH [--json]
     repo-weaver build-dashboard <corpus> --out PATH [--theme PATH]
 """
 
@@ -17,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import importlib
+import json
 import os
 import shutil
 import subprocess
@@ -338,12 +340,31 @@ def cmd_replay(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------------------
 
 
-def cmd_sync(args: argparse.Namespace) -> int:
-    """Detect changed/tracked repos since the corpus's last sync and re-weave them.
+def _sync_exit_code(result: dict[str, object], dry_run: bool) -> int:
+    """Determine the exit code for a ``sync_corpus()`` result.
 
-    Thin CLI wrapper over :func:`repo_weaver.sync.sync_corpus` — see that
+    A genuine ``gh`` discovery failure for any owner makes the run non-zero
+    regardless of what else happened -- the CHANGED list is incomplete for
+    that owner, and an unattended/scheduled caller must not mistake this for
+    a real no-op (silent-stale trap).
+    """
+    if result.get("discovery_failed"):
+        return 1
+    changed = result.get("changed", [])
+    if not changed or dry_run:
+        return 0
+    failed = result.get("failed", [])
+    return 1 if failed else 0
+
+
+def cmd_sync(args: argparse.Namespace) -> int:
+    """Detect changed/tracked repos since each repo's own last sync and re-weave them.
+
+    Thin CLI wrapper over :func:`repo_weaver.sync.sync_corpus` -- see that
     function's docstring for the full detection + weave algorithm.
     """
+    output_json: bool = getattr(args, "json", False)
+
     try:
         result = sync_corpus(
             corpus=args.corpus,
@@ -354,8 +375,15 @@ def cmd_sync(args: argparse.Namespace) -> int:
             max_modules=args.max_modules,
         )
     except ValueError as exc:
-        print(f"ERROR: {exc}", file=sys.stderr)
+        if output_json:
+            print(json.dumps({"error": str(exc)}, indent=2))
+        else:
+            print(f"ERROR: {exc}", file=sys.stderr)
         return 1
+
+    if output_json:
+        print(json.dumps(result, indent=2))
+        return _sync_exit_code(result, args.dry_run)
 
     changed = result["changed"]
     print(f"[repo-weaver] Last sync: {result['last_sync']}  ->  {result['until']}")
@@ -363,17 +391,26 @@ def cmd_sync(args: argparse.Namespace) -> int:
     for err in result["errors"]:
         print(f"[repo-weaver] WARNING: {err}", file=sys.stderr)
 
+    discovery_failed = result.get("discovery_failed", [])
+    if discovery_failed:
+        print(
+            f"[repo-weaver] ERROR: gh discovery failed for {len(discovery_failed)} "
+            f"owner(s): {', '.join(discovery_failed)} -- the changed-repo list is "
+            "incomplete for these owners; re-run once the underlying gh issue is resolved.",
+            file=sys.stderr,
+        )
+
     if not changed:
         print("[repo-weaver] No tracked repos changed since last sync.")
-        return 0
+        return _sync_exit_code(result, args.dry_run)
 
     print(f"[repo-weaver] Changed: {len(changed)} repo(s)")
     for entry in changed:
         print(f"  - {entry['nameWithOwner']}  (pushed {entry['pushedAt']})")
 
     if args.dry_run:
-        print("\n[repo-weaver] dry-run complete — no clones made, nothing woven.")
-        return 0
+        print("\n[repo-weaver] dry-run complete -- no clones made, nothing woven.")
+        return _sync_exit_code(result, args.dry_run)
 
     woven = result.get("woven", [])
     failed = result.get("failed", [])
@@ -382,8 +419,71 @@ def cmd_sync(args: argparse.Namespace) -> int:
         print(f"[repo-weaver] FAILED: {len(failed)} repo(s):", file=sys.stderr)
         for name in failed:
             print(f"  - {name}", file=sys.stderr)
+    return _sync_exit_code(result, args.dry_run)
+
+
+# ---------------------------------------------------------------------------
+# Subcommand: discover
+# ---------------------------------------------------------------------------
+
+
+def cmd_discover(args: argparse.Namespace) -> int:
+    """Discover repos matching caller-supplied rules via ``gh`` (mechanism only).
+
+    ``--rules-file`` is authored and owned by the CALLER (e.g. Team Pulse's own
+    orchestrator) -- repo-weaver does not define, validate, or persist a
+    discovery config schema; it only loads whatever rule list is passed in and
+    applies it via :func:`repo_weaver.gitio.discover_repos`. Policy (which
+    owners, which match patterns, fork/visibility rules per source) stays
+    entirely with the caller; repo-weaver supplies only the mechanism.
+    """
+    output_json: bool = getattr(args, "json", False)
+    rules_path = Path(args.rules_file).expanduser()
+
+    try:
+        raw = rules_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        msg = f"could not read --rules-file {rules_path}: {exc}"
+        if output_json:
+            print(json.dumps({"error": msg}, indent=2))
+        else:
+            print(f"ERROR: {msg}", file=sys.stderr)
         return 1
-    return 0
+
+    try:
+        rules = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        msg = f"--rules-file is not valid JSON: {exc}"
+        if output_json:
+            print(json.dumps({"error": msg}, indent=2))
+        else:
+            print(f"ERROR: {msg}", file=sys.stderr)
+        return 1
+
+    if not isinstance(rules, list):
+        msg = "--rules-file must contain a JSON list of rule objects."
+        if output_json:
+            print(json.dumps({"error": msg}, indent=2))
+        else:
+            print(f"ERROR: {msg}", file=sys.stderr)
+        return 1
+
+    matched, errors = gitio.discover_repos(rules)
+
+    if output_json:
+        print(json.dumps({"matched": matched, "errors": errors}, indent=2))
+        return 1 if errors else 0
+
+    print(
+        f"[repo-weaver] Discovered {len(matched)} repo(s) across {len(rules)} rule(s)."
+    )
+    for repo in matched:
+        name_with_owner = repo.get("nameWithOwner", "?")
+        pushed_at = repo.get("pushedAt", "")
+        print(f"  - {name_with_owner}  (pushed {pushed_at})")
+    for err in errors:
+        print(f"[repo-weaver] WARNING: {err}", file=sys.stderr)
+    return 1 if errors else 0
 
 
 # ---------------------------------------------------------------------------
@@ -728,10 +828,53 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="N",
         help=(
             "Max module snapshot documents to emit per changed repo (default: 0 "
-            "— changes-only, matching a fast-sync run)."
+            "-- changes-only, matching a fast-sync run)."
+        ),
+    )
+    p.add_argument(
+        "--json",
+        action="store_true",
+        help=(
+            "Output the structured sync result as JSON to stdout instead of the "
+            "human-readable summary (for programmatic/scheduled callers)."
         ),
     )
     p.set_defaults(func=cmd_sync)
+
+    # ---- discover ----
+    p = sub.add_parser(
+        "discover",
+        help=(
+            "Discover repos matching caller-supplied rules via `gh` "
+            "(mechanism only -- repo-weaver does not own a discovery config schema)."
+        ),
+    )
+    p.add_argument(
+        "--rules-file",
+        required=True,
+        metavar="PATH",
+        help=(
+            "Path to a JSON file containing a list of discovery rule objects, e.g. "
+            '[{"owner": "microsoft", "match": "amplifier*", "include_forks": true, '
+            '"visibility": "all"}, {"owner": "someuser", "match": "amplifier*", '
+            '"include_forks": false, "visibility": "all"}]. '
+            "This file is authored and OWNED BY THE CALLER (e.g. your own orchestrator) "
+            "-- repo-weaver does not define, validate, or persist a discovery config "
+            "schema; it only loads and applies whatever rules you pass in, each "
+            "invocation. Rule keys: owner (required), match (glob/prefix, required), "
+            "include_forks (bool, default true), visibility "
+            '("public"/"private"/"all", default "all").'
+        ),
+    )
+    p.add_argument(
+        "--json",
+        action="store_true",
+        help=(
+            "Output JSON: {matched: [...], errors: [...]} for programmatic "
+            "consumption (e.g. by an orchestrator that calls `discover` then `sync`)."
+        ),
+    )
+    p.set_defaults(func=cmd_discover)
 
     # ---- build-dashboard ----
     p = sub.add_parser(

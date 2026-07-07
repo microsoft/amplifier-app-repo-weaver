@@ -93,6 +93,14 @@ After installing, verify everything:
 repo-weaver doctor
 ```
 
+> **Troubleshooting:** if `uv tool install` / `uv tool upgrade` hangs or times out
+> waiting for a cache lock, check for other concurrently-running `uv`-managed
+> processes on the machine -- `uv`'s cache lock is machine-global, not
+> per-project. Either wait for the other process to finish, close it, or set
+> `UV_LOCK_TIMEOUT` to a larger value. (Both `uv tool install --force` and
+> `uv tool upgrade` were verified working cleanly against current `main`; the
+> only reproducible failure mode found was this cache-lock contention.)
+
 ---
 
 ## Quickstart (single repo, small and cheap)
