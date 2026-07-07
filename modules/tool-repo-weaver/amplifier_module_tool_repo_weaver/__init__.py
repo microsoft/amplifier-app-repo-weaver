@@ -1,9 +1,10 @@
 """Amplifier tool module: repo-weaver commands as mountable tools.
 
-Registers 3 tools — one per core repo-weaver command — that an AmplifierSession
+Registers 5 tools — one per core repo-weaver command — that an AmplifierSession
 agent can invoke. Each tool is a thin wrapper over the importable
 ``repo_weaver`` lib API (``repo_weaver.init``, ``repo_weaver.weave``,
-``repo_weaver.ask``):
+``repo_weaver.ask``, ``repo_weaver.sync.sync_corpus``,
+``repo_weaver.gitio.discover_repos``):
 
     tool.execute(input_data)
       → await asyncio.to_thread(run_<cmd>, ...)   (lib fns are SYNCHRONOUS)
@@ -49,8 +50,14 @@ from typing import Any
 
 import repo_weaver
 from amplifier_core import ToolResult
+from repo_weaver.gitio import discover_repos
+from repo_weaver.sync import sync_corpus
 
 logger = logging.getLogger(__name__)
+
+# Mirrors repo_weaver.cli._DEFAULT_SYNC_CLONES_DIR (a CLI-layer default, not
+# re-imported here to avoid reaching into the CLI module's internals).
+_DEFAULT_CLONES_DIR = "~/dev/amplifier-corpus-clones"
 
 
 # ---------------------------------------------------------------------------
@@ -301,6 +308,209 @@ class RepoWeaverAskTool:
             return ToolResult(success=rc == 0, output=output[:8000])
 
 
+class RepoWeaverSyncTool:
+    """Detect and re-weave tracked repos that changed since their own last sync."""
+
+    @property
+    def name(self) -> str:
+        return "repo_weaver_sync"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Detect tracked repos that changed since the corpus's OWN per-repo "
+            "last-sync date (derived from _sources/*-changes.md filenames — no manual "
+            "repo list needed) via `gh`, then clone/re-weave each changed repo over the "
+            "existing single-repo weave path. LONG-RUNNING whenever repos have changed "
+            "(each is a full weave). Returns the structured sync result (last_sync, "
+            "until, owners, changed, errors, discovery_failed, and — unless dry_run — "
+            "woven/failed) as JSON. The corpus must already have at least one "
+            "repo_weaver_weave run (or pass `since` explicitly). Wraps "
+            "repo_weaver.sync.sync_corpus(...)."
+        )
+
+    @property
+    def input_schema(self) -> dict:
+        return {
+            "type": "object",
+            "properties": {
+                "corpus": {
+                    "type": "string",
+                    "description": (
+                        "Absolute path to the corpus directory. Must already have at "
+                        "least one change-digest source under _sources/ (from a prior "
+                        "repo_weaver_weave), unless `since` is supplied explicitly."
+                    ),
+                },
+                "clones_dir": {
+                    "type": "string",
+                    "description": (
+                        "Directory to hold/locate local clones of changed repos, one "
+                        "subdirectory per repo (<clones_dir>/<owner>__<repo>). '~' is "
+                        f"expanded. Default: {_DEFAULT_CLONES_DIR!r}."
+                    ),
+                },
+                "since": {
+                    "type": "string",
+                    "description": (
+                        "Override the detected last-sync date (YYYY-MM-DD, exclusive), "
+                        "applied globally to every tracked repo. Omit to use each "
+                        "repo's own last-sync date, derived independently from its own "
+                        "_sources/*-changes.md filenames."
+                    ),
+                },
+                "until": {
+                    "type": "string",
+                    "description": (
+                        "Window end date (inclusive), ISO format YYYY-MM-DD. Omit to "
+                        "use today's date."
+                    ),
+                },
+                "dry_run": {
+                    "type": "boolean",
+                    "description": (
+                        "If true, detect and report the changed-repo list only; do NOT "
+                        "clone or weave anything (default false)."
+                    ),
+                },
+                "max_modules": {
+                    "type": "integer",
+                    "description": (
+                        "Max module-snapshot documents to emit per changed repo "
+                        "(default 0 — changes-only, matching a fast-sync run)."
+                    ),
+                },
+            },
+            "required": ["corpus"],
+        }
+
+    async def execute(self, input_data: dict[str, Any]) -> ToolResult:
+        corpus = input_data["corpus"]
+        clones_dir = input_data.get("clones_dir") or _DEFAULT_CLONES_DIR
+        # Treat empty string the same as omitted (let sync_corpus derive per-repo).
+        since: str | None = input_data.get("since") or None
+        until: str | None = input_data.get("until") or None
+        dry_run = bool(input_data.get("dry_run", False))
+        max_modules = int(input_data.get("max_modules", 0))
+
+        def _call() -> dict[str, Any]:
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                # sync_corpus has one internal print() (a staleness warning on
+                # clone-ensure failure); captured here so it reaches the agent
+                # even though the structured result dict is the primary output.
+                return sync_corpus(
+                    corpus=corpus,
+                    clones_dir=clones_dir,
+                    since=since,
+                    until=until,
+                    dry_run=dry_run,
+                    max_modules=max_modules,
+                )
+
+        try:
+            result = await asyncio.to_thread(_call)
+        except ValueError as exc:
+            # Raised when no last-sync date is derivable (never-woven corpus,
+            # no `since` override) — see sync_corpus's docstring.
+            return ToolResult(success=False, output=f"sync error: {exc}")
+
+        # Mirrors repo_weaver.cli._sync_exit_code(): a genuine gh discovery
+        # failure always fails (the changed-list is incomplete for that
+        # owner); otherwise success unless a changed repo failed to
+        # clone/weave.
+        if result.get("discovery_failed"):
+            success = False
+        elif not result.get("changed") or dry_run:
+            success = True
+        else:
+            success = not result.get("failed")
+
+        return ToolResult(success=success, output=json.dumps(result, indent=2)[:8000])
+
+
+class RepoWeaverDiscoverTool:
+    """Discover repos matching caller-supplied rules via `gh` (mechanism only)."""
+
+    @property
+    def name(self) -> str:
+        return "repo_weaver_discover"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Discover GitHub repos across one or more owners via `gh` (mechanism "
+            "only — repo-weaver does not own, validate, or persist a discovery "
+            "policy; the caller decides which owners/patterns/visibility to use). "
+            "Each rule supplies an owner (user or org) plus a name-match pattern; "
+            "matched repos across all rules are merged and deduplicated by "
+            "nameWithOwner. Use this to find NEW repos to register/weave — not to "
+            "re-check already-tracked ones (that's repo_weaver_sync's job). Wraps "
+            "repo_weaver.gitio.discover_repos(rules)."
+        )
+
+    @property
+    def input_schema(self) -> dict:
+        return {
+            "type": "object",
+            "properties": {
+                "rules": {
+                    "type": "array",
+                    "description": (
+                        "List of discovery rule objects, one per owner/source. Each "
+                        "rule is queried independently via `gh repo list`; matched "
+                        "repos from all rules are merged and deduplicated."
+                    ),
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "owner": {
+                                "type": "string",
+                                "description": (
+                                    "GitHub user or org login to query (required)."
+                                ),
+                            },
+                            "match": {
+                                "type": "string",
+                                "description": (
+                                    "Glob/prefix pattern matched against each repo's "
+                                    'name via fnmatch, e.g. "amplifier*" (required).'
+                                ),
+                            },
+                            "include_forks": {
+                                "type": "boolean",
+                                "description": "Include forked repos (default true).",
+                            },
+                            "visibility": {
+                                "type": "string",
+                                "enum": ["public", "private", "all"],
+                                "description": (
+                                    "Repo visibility filter, honoring the `gh` "
+                                    "token's access (default 'all')."
+                                ),
+                            },
+                        },
+                        "required": ["owner", "match"],
+                    },
+                },
+            },
+            "required": ["rules"],
+        }
+
+    async def execute(self, input_data: dict[str, Any]) -> ToolResult:
+        rules = input_data["rules"]
+
+        def _call() -> tuple[list[dict[str, object]], list[str]]:
+            return discover_repos(rules)
+
+        matched, errors = await asyncio.to_thread(_call)
+
+        # Mirrors repo_weaver.cli.cmd_discover(): a rule-level gh failure
+        # makes the run non-zero regardless of how many other rules matched.
+        output = json.dumps({"matched": matched, "errors": errors}, indent=2)
+        return ToolResult(success=not errors, output=output[:8000])
+
+
 # ---------------------------------------------------------------------------
 # mount() — THE required entry point. Iron Law: must call coordinator.mount()
 # for every tool, or protocol_compliance validation fails.
@@ -310,6 +520,8 @@ _TOOLS = [
     RepoWeaverInitTool(),
     RepoWeaverWeaveTool(),
     RepoWeaverAskTool(),
+    RepoWeaverSyncTool(),
+    RepoWeaverDiscoverTool(),
 ]
 
 

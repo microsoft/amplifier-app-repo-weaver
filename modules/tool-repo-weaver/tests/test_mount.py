@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -51,16 +51,16 @@ from amplifier_module_tool_repo_weaver import mount  # noqa: E402
 
 
 @pytest.mark.asyncio
-async def test_mount_registers_all_three_tools() -> None:
-    """mount() MUST register all 3 tools via coordinator.mount() — Iron Law."""
+async def test_mount_registers_all_five_tools() -> None:
+    """mount() MUST register all 5 tools via coordinator.mount() — Iron Law."""
     coordinator = MagicMock()
     coordinator.mount = AsyncMock()
 
     await mount(coordinator)
 
-    # Three tools must be registered.
-    assert coordinator.mount.call_count == 3, (
-        f"Expected 3 coordinator.mount() calls, got {coordinator.mount.call_count}. "
+    # Five tools must be registered.
+    assert coordinator.mount.call_count == 5, (
+        f"Expected 5 coordinator.mount() calls, got {coordinator.mount.call_count}. "
         "Iron Law violation: mount() must register all tools."
     )
 
@@ -86,20 +86,22 @@ async def test_mount_returns_metadata_dict_not_none() -> None:
 
 
 @pytest.mark.asyncio
-async def test_mount_provides_three_tool_names() -> None:
-    """The 'provides' list must contain exactly 3 tool names."""
+async def test_mount_provides_five_tool_names() -> None:
+    """The 'provides' list must contain exactly 5 tool names."""
     coordinator = MagicMock()
     coordinator.mount = AsyncMock()
 
     result = await mount(coordinator)
 
     provides = result["provides"]
-    assert len(provides) == 3, (
-        f"Expected 3 provided tools, got {len(provides)}: {provides}"
+    assert len(provides) == 5, (
+        f"Expected 5 provided tools, got {len(provides)}: {provides}"
     )
     assert "repo_weaver_init" in provides
     assert "repo_weaver_weave" in provides
     assert "repo_weaver_ask" in provides
+    assert "repo_weaver_sync" in provides
+    assert "repo_weaver_discover" in provides
 
 
 @pytest.mark.asyncio
@@ -140,3 +142,110 @@ async def test_tool_names_match_registered_names() -> None:
         assert registered_name == tool.name, (
             f"Registered name {registered_name!r} does not match tool.name {tool.name!r}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Per-tool execute() tests for the two new tools (sync_corpus / discover_repos
+# mocked at the import boundary, i.e. the names bound into
+# amplifier_module_tool_repo_weaver's own module namespace).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_sync_tool_execute_success() -> None:
+    """RepoWeaverSyncTool.execute() succeeds and returns the result dict as JSON."""
+    from amplifier_module_tool_repo_weaver import RepoWeaverSyncTool
+
+    fake_result = {
+        "last_sync": "2026-07-01",
+        "until": "2026-07-07",
+        "owners": {"microsoft": 0},
+        "changed": [],
+        "errors": [],
+        "discovery_failed": [],
+    }
+
+    with patch(
+        "amplifier_module_tool_repo_weaver.sync_corpus", return_value=fake_result
+    ) as mock_sync:
+        tool = RepoWeaverSyncTool()
+        result = await tool.execute({"corpus": "/tmp/corpus"})
+
+    mock_sync.assert_called_once()
+    assert result.success is True
+    assert isinstance(result.output, str)
+    assert '"last_sync": "2026-07-01"' in result.output
+
+
+@pytest.mark.asyncio
+async def test_sync_tool_execute_discovery_failure() -> None:
+    """RepoWeaverSyncTool.execute() fails when gh discovery failed for an owner.
+
+    Mirrors repo_weaver.cli._sync_exit_code(): discovery_failed always means
+    non-zero/failure, regardless of the (empty) changed list.
+    """
+    from amplifier_module_tool_repo_weaver import RepoWeaverSyncTool
+
+    fake_result = {
+        "last_sync": "2026-07-01",
+        "until": "2026-07-07",
+        "owners": {"microsoft": 0},
+        "changed": [],
+        "errors": ["microsoft: gh auth failed"],
+        "discovery_failed": ["microsoft"],
+    }
+
+    with patch(
+        "amplifier_module_tool_repo_weaver.sync_corpus", return_value=fake_result
+    ):
+        tool = RepoWeaverSyncTool()
+        result = await tool.execute({"corpus": "/tmp/corpus"})
+
+    assert result.success is False
+
+
+@pytest.mark.asyncio
+async def test_discover_tool_execute_success() -> None:
+    """RepoWeaverDiscoverTool.execute() succeeds and returns matched repos as JSON."""
+    from amplifier_module_tool_repo_weaver import RepoWeaverDiscoverTool
+
+    fake_matched = [
+        {
+            "name": "amplifier-app-repo-weaver",
+            "nameWithOwner": "microsoft/amplifier-app-repo-weaver",
+        }
+    ]
+
+    with patch(
+        "amplifier_module_tool_repo_weaver.discover_repos",
+        return_value=(fake_matched, []),
+    ) as mock_discover:
+        tool = RepoWeaverDiscoverTool()
+        result = await tool.execute(
+            {"rules": [{"owner": "microsoft", "match": "amplifier*"}]}
+        )
+
+    mock_discover.assert_called_once()
+    assert result.success is True
+    assert isinstance(result.output, str)
+    assert "amplifier-app-repo-weaver" in result.output
+
+
+@pytest.mark.asyncio
+async def test_discover_tool_execute_failure() -> None:
+    """RepoWeaverDiscoverTool.execute() fails when a rule's gh call errored.
+
+    Mirrors repo_weaver.cli.cmd_discover(): any error makes the run non-zero.
+    """
+    from amplifier_module_tool_repo_weaver import RepoWeaverDiscoverTool
+
+    with patch(
+        "amplifier_module_tool_repo_weaver.discover_repos",
+        return_value=([], ["someowner: gh auth failed"]),
+    ):
+        tool = RepoWeaverDiscoverTool()
+        result = await tool.execute(
+            {"rules": [{"owner": "someowner", "match": "amplifier*"}]}
+        )
+
+    assert result.success is False
