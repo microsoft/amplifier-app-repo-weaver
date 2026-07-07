@@ -216,7 +216,140 @@ def test_sync_dry_run_does_not_clone_or_weave(
 def test_sync_non_dry_run_clones_and_weaves_each_changed_repo(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    """Sanity check the non-dry-run path DOES call clone + weave once per changed repo."""
+    """Sanity check the non-dry-run path DOES call clone + weave once per changed repo.
+
+    The mocked ``_weave`` writes the expected change-digest into ``_sources/``
+    as its side effect (mirroring what a real successful weave call does) --
+    accounting is based on that file's presence, not the raw returncode alone
+    (see SYNC6/SYNC7 below).
+    """
+    corpus = _make_corpus_with_tracked(tmp_path)
+
+    def fake_gh_list_repos(owner: str) -> list[dict[str, Any]]:
+        if owner == "microsoft":
+            return [
+                {
+                    "name": "amplifier-app-repo-weaver",
+                    "isFork": False,
+                    "pushedAt": "2026-07-01T00:00:00Z",
+                    "nameWithOwner": "microsoft/amplifier-app-repo-weaver",
+                }
+            ]
+        return []
+
+    monkeypatch.setattr(gitio, "gh_list_repos", fake_gh_list_repos)
+
+    def fake_weave_writes_digest(**kwargs: Any) -> int:
+        _write_source(
+            corpus, "microsoft__amplifier-app-repo-weaver-2026-07-07-changes.md"
+        )
+        return 0
+
+    with (
+        patch("repo_weaver.sync._ensure_local_clone", return_value=True) as mock_clone,
+        patch(
+            "repo_weaver.sync._weave", side_effect=fake_weave_writes_digest
+        ) as mock_weave,
+    ):
+        result = sync.sync_corpus(
+            corpus=str(corpus),
+            clones_dir=str(tmp_path / "clones"),
+            until="2026-07-07",
+            dry_run=False,
+        )
+
+    mock_clone.assert_called_once()
+    mock_weave.assert_called_once()
+    _, weave_kwargs = mock_weave.call_args
+    assert weave_kwargs["since"] == "2026-06-25"
+    assert weave_kwargs["max_modules"] == 0
+    assert result["woven"] == [
+        {"repo": "microsoft/amplifier-app-repo-weaver", "returncode": 0}
+    ]
+    assert result["failed"] == []
+
+
+# ---------------------------------------------------------------------------
+# SYNC6 / SYNC7 -- per-repo success determined by the landed digest file,
+# not the raw weave() returncode (regression for the retry-recovery bug:
+# an OOM-killed (-9) initial ingest whose source is later recovered by
+# wiki-weaver's own .wiki/failed/ retry logic must count as succeeded).
+# ---------------------------------------------------------------------------
+
+
+def test_sync_counts_repo_as_succeeded_when_digest_lands_despite_nonzero_rc(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """weave() reports failure (e.g. stale -9 from an OOM-killed initial ingest)
+    but its own internal retry-from-.wiki/failed/ recovery lands the digest
+    anyway. sync_corpus must count this repo as succeeded (empirical check:
+    the expected _sources/*-changes.md file exists), and the CLI must exit 0.
+    """
+    corpus = _make_corpus_with_tracked(tmp_path)
+
+    def fake_gh_list_repos(owner: str) -> list[dict[str, Any]]:
+        if owner == "microsoft":
+            return [
+                {
+                    "name": "amplifier-app-repo-weaver",
+                    "isFork": False,
+                    "pushedAt": "2026-07-01T00:00:00Z",
+                    "nameWithOwner": "microsoft/amplifier-app-repo-weaver",
+                }
+            ]
+        return []
+
+    monkeypatch.setattr(gitio, "gh_list_repos", fake_gh_list_repos)
+
+    def fake_weave_recovers_but_reports_stale_failure(**kwargs: Any) -> int:
+        # Simulates weave()'s own retry mechanism recovering the source even
+        # though the returncode still reflects the initial (pre-retry) crash.
+        _write_source(
+            corpus, "microsoft__amplifier-app-repo-weaver-2026-07-07-changes.md"
+        )
+        return -9
+
+    with (
+        patch("repo_weaver.sync._ensure_local_clone", return_value=True),
+        patch(
+            "repo_weaver.sync._weave",
+            side_effect=fake_weave_recovers_but_reports_stale_failure,
+        ),
+    ):
+        result = sync.sync_corpus(
+            corpus=str(corpus),
+            clones_dir=str(tmp_path / "clones"),
+            until="2026-07-07",
+            dry_run=False,
+        )
+
+    assert result["woven"] == [
+        {"repo": "microsoft/amplifier-app-repo-weaver", "returncode": -9}
+    ]
+    assert result["failed"] == [], (
+        "A repo whose digest landed must never be reported as failed, "
+        "regardless of weave()'s raw returncode."
+    )
+
+    args = argparse.Namespace(
+        corpus=str(corpus),
+        clones_dir=str(tmp_path / "clones"),
+        since=None,
+        until="2026-07-07",
+        dry_run=False,
+        max_modules=0,
+    )
+    with patch("repo_weaver.cli.sync_corpus", return_value=result):
+        rc = cli.cmd_sync(args)
+    assert rc == 0
+
+
+def test_sync_counts_repo_as_failed_when_digest_never_lands(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """A genuine failure -- the expected digest never appears in _sources/ --
+    must still be counted as failed and the CLI must exit non-zero.
+    """
     corpus = _make_corpus_with_tracked(tmp_path)
 
     def fake_gh_list_repos(owner: str) -> list[dict[str, Any]]:
@@ -234,24 +367,32 @@ def test_sync_non_dry_run_clones_and_weaves_each_changed_repo(
     monkeypatch.setattr(gitio, "gh_list_repos", fake_gh_list_repos)
 
     with (
-        patch("repo_weaver.sync._ensure_local_clone", return_value=True) as mock_clone,
-        patch("repo_weaver.sync._weave", return_value=0) as mock_weave,
+        patch("repo_weaver.sync._ensure_local_clone", return_value=True),
+        patch("repo_weaver.sync._weave", return_value=1),
     ):
         result = sync.sync_corpus(
             corpus=str(corpus),
             clones_dir=str(tmp_path / "clones"),
+            until="2026-07-07",
             dry_run=False,
         )
 
-    mock_clone.assert_called_once()
-    mock_weave.assert_called_once()
-    _, weave_kwargs = mock_weave.call_args
-    assert weave_kwargs["since"] == "2026-06-25"
-    assert weave_kwargs["max_modules"] == 0
     assert result["woven"] == [
-        {"repo": "microsoft/amplifier-app-repo-weaver", "returncode": 0}
+        {"repo": "microsoft/amplifier-app-repo-weaver", "returncode": 1}
     ]
-    assert result["failed"] == []
+    assert result["failed"] == ["microsoft/amplifier-app-repo-weaver"]
+
+    args = argparse.Namespace(
+        corpus=str(corpus),
+        clones_dir=str(tmp_path / "clones"),
+        since=None,
+        until="2026-07-07",
+        dry_run=False,
+        max_modules=0,
+    )
+    with patch("repo_weaver.cli.sync_corpus", return_value=result):
+        rc = cli.cmd_sync(args)
+    assert rc == 1
 
 
 # ---------------------------------------------------------------------------
