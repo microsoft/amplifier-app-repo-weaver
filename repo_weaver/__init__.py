@@ -23,10 +23,9 @@ Typical lib usage::
 
 from __future__ import annotations
 
+from ._version import __version__
 from .materialize import materialize
 from .weave import ask, init, replay_windows, weave, weave_multi
-
-__version__ = "0.1.0"
 
 __all__ = [
     "__version__",

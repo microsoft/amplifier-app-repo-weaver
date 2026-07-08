@@ -31,6 +31,8 @@ from typing import Optional
 from wiki_weaver.lib import wiki_dashboard
 
 from . import gitio, updater
+from ._version import __version__
+from ._version_resolve import resolve_version
 from .sync import sync_corpus
 from .weave import _DEFAULT_MAX_CYCLES, _DEFAULT_MAX_RETRIES, _POLICY_SCHEMA
 
@@ -647,6 +649,26 @@ def cmd_update(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------------------
 
 
+class _VersionAction(argparse.Action):
+    """Resolves + prints the version lazily, only when --version is passed.
+
+    Unlike argparse's built-in "version" action (which formats its string
+    eagerly at add_argument() time), this defers resolve_version() until the
+    flag is actually invoked -- so a possible dev-mode git subprocess call
+    (see repo_weaver._version_resolve) never runs on ordinary command
+    invocations, only on `repo-weaver --version` itself.
+    """
+
+    def __init__(self, option_strings, dest=argparse.SUPPRESS, **kwargs) -> None:
+        kwargs.setdefault("nargs", 0)
+        kwargs.setdefault("help", "show program's version number and exit")
+        super().__init__(option_strings, dest, **kwargs)
+
+    def __call__(self, parser, namespace, values, option_string=None) -> None:
+        print(f"repo-weaver {resolve_version(__version__)}")
+        parser.exit()
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="repo-weaver",
@@ -654,7 +676,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "Turn a git repo's commits and PRs into a queryable wiki corpus via wiki-weaver."
         ),
     )
-    parser.add_argument("--version", action="version", version="%(prog)s 0.1.0")
+    parser.add_argument("--version", action=_VersionAction)
 
     sub = parser.add_subparsers(dest="command", required=True)
 

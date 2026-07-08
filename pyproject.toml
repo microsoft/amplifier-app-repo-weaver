@@ -25,6 +25,11 @@ dev = ["pytest"]
 [project.scripts]
 repo-weaver = "repo_weaver.cli:main"
 
+[tool.hatch.build.hooks.custom]
+# Bakes a git-derived version (commit date + short SHA) into
+# repo_weaver/_version.py at wheel-build time -- see hatch_build.py.
+path = "hatch_build.py"
+
 [tool.hatch.build.targets.wheel]
 # policy/schema.md lives inside repo_weaver/policy/ so it is included in the
 # wheel automatically alongside the Python source.  Works for both editable and
@@ -39,4 +44,8 @@ allow-direct-references = true
 [dependency-groups]
 dev = [
     "pytest-asyncio>=1.4.0",
+    # Not a runtime dep -- needed only so tests/test_hatch_build.py can import
+    # the real hatchling.builders.hooks.plugin.interface.BuildHookInterface
+    # that hatch_build.py's build hook subclasses.
+    "hatchling>=1.28.0",
 ]
