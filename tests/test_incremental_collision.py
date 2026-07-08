@@ -124,6 +124,11 @@ def _patched_weave(
         patch("repo_weaver.materialize.gitio.get_commits_name_only", return_value=[]),
         patch("repo_weaver.materialize.gitio.gh_merged_prs", return_value=([], None)),
         patch("repo_weaver.materialize.gitio.get_shortlog_authors", return_value=[]),
+        patch("repo_weaver.materialize.gitio.gh_issues", return_value=([], None)),
+        patch(
+            "repo_weaver.materialize.gitio.gh_pr_discussion",
+            return_value=({"comments": [], "reviews": []}, None),
+        ),
     ):
         yield
 

@@ -55,6 +55,14 @@ def _make_digest(
             "repo_weaver.materialize.gitio.get_shortlog_authors",
             return_value=[],
         ),
+        patch(
+            "repo_weaver.materialize.gitio.gh_issues",
+            return_value=([], None),
+        ),
+        patch(
+            "repo_weaver.materialize.gitio.gh_pr_discussion",
+            return_value=({"comments": [], "reviews": []}, None),
+        ),
     ):
         return _build_change_digest(
             repo="/fake/repo",

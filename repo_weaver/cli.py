@@ -387,6 +387,46 @@ def cmd_replay(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Shared: discovery rules-file loading (used by `discover` and `sync --rules-file`)
+# ---------------------------------------------------------------------------
+
+
+def _load_rules_file(
+    rules_file: str,
+) -> tuple[Optional[list[dict[str, object]]], Optional[str]]:
+    """Read + parse a discovery rules JSON file.
+
+    Shared by ``cmd_discover`` and ``cmd_sync`` (when ``--rules-file`` is
+    supplied to ``sync``) so the two commands never drift on what counts as
+    a valid rules file -- both accept the exact same shape, documented on
+    :func:`repo_weaver.gitio.discover_repos`.
+
+    Returns a ``(rules, error)`` tuple:
+
+    * ``(rules, None)`` -- the file was read and parsed as a JSON list of
+      rule dicts.
+    * ``(None, error)`` -- the file could not be read, was not valid JSON,
+      or was not a JSON list; *error* is a human-readable reason.
+    """
+    rules_path = Path(rules_file).expanduser()
+
+    try:
+        raw = rules_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        return None, f"could not read --rules-file {rules_path}: {exc}"
+
+    try:
+        rules = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        return None, f"--rules-file is not valid JSON: {exc}"
+
+    if not isinstance(rules, list):
+        return None, "--rules-file must contain a JSON list of rule objects."
+
+    return rules, None
+
+
+# ---------------------------------------------------------------------------
 # Subcommand: sync
 # ---------------------------------------------------------------------------
 
@@ -397,9 +437,16 @@ def _sync_exit_code(result: dict[str, object], dry_run: bool) -> int:
     A genuine ``gh`` discovery failure for any owner makes the run non-zero
     regardless of what else happened -- the CHANGED list is incomplete for
     that owner, and an unattended/scheduled caller must not mistake this for
-    a real no-op (silent-stale trap).
+    a real no-op (silent-stale trap). A failed onboarding attempt (clone or
+    weave did not produce the expected digest for a newly-discovered repo)
+    is the same kind of loud, non-fatal-to-the-run failure -- it also forces
+    a non-zero exit rather than being silently swallowed.
     """
     if result.get("discovery_failed"):
+        return 1
+    onboarded_raw = result.get("onboarded", [])
+    onboarded_list = onboarded_raw if isinstance(onboarded_raw, list) else []
+    if any(isinstance(o, dict) and o.get("status") == "failed" for o in onboarded_list):
         return 1
     changed = result.get("changed", [])
     if not changed or dry_run:
@@ -412,9 +459,22 @@ def cmd_sync(args: argparse.Namespace) -> int:
     """Detect changed/tracked repos since each repo's own last sync and re-weave them.
 
     Thin CLI wrapper over :func:`repo_weaver.sync.sync_corpus` -- see that
-    function's docstring for the full detection + weave algorithm.
+    function's docstring for the full detection + weave algorithm, and for
+    the ``rules``-driven discover -> onboard -> sync flow triggered by
+    ``--rules-file``.
     """
     output_json: bool = getattr(args, "json", False)
+
+    rules: Optional[list[dict[str, object]]] = None
+    rules_file: Optional[str] = getattr(args, "rules_file", None)
+    if rules_file:
+        rules, error = _load_rules_file(rules_file)
+        if error is not None:
+            if output_json:
+                print(json.dumps({"error": error}, indent=2))
+            else:
+                print(f"ERROR: {error}", file=sys.stderr)
+            return 1
 
     try:
         result = sync_corpus(
@@ -424,6 +484,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
             until=args.until,
             dry_run=args.dry_run,
             max_modules=args.max_modules,
+            rules=rules,
         )
     except ValueError as exc:
         if output_json:
@@ -450,6 +511,33 @@ def cmd_sync(args: argparse.Namespace) -> int:
             "incomplete for these owners; re-run once the underlying gh issue is resolved.",
             file=sys.stderr,
         )
+
+    onboarded_raw = result.get("onboarded", [])
+    onboarded: list[dict[str, object]] = (
+        onboarded_raw if isinstance(onboarded_raw, list) else []
+    )
+    if onboarded:
+        onboarded_ok = [o for o in onboarded if o.get("status") == "onboarded"]
+        onboarded_would = [o for o in onboarded if o.get("status") == "would_onboard"]
+        onboarded_failed = [o for o in onboarded if o.get("status") == "failed"]
+        if onboarded_would:
+            print(
+                f"[repo-weaver] Would onboard {len(onboarded_would)} new repo(s) "
+                "(dry-run -- not cloned or woven):"
+            )
+            for o in onboarded_would:
+                print(f"  - {o['nameWithOwner']}")
+        elif onboarded_ok:
+            print(f"[repo-weaver] Onboarded {len(onboarded_ok)} new repo(s):")
+            for o in onboarded_ok:
+                print(f"  - {o['nameWithOwner']}")
+        if onboarded_failed:
+            print(
+                f"[repo-weaver] FAILED to onboard {len(onboarded_failed)} repo(s):",
+                file=sys.stderr,
+            )
+            for o in onboarded_failed:
+                print(f"  - {o['nameWithOwner']}", file=sys.stderr)
 
     if not changed:
         print("[repo-weaver] No tracked repos changed since last sync.")
@@ -923,6 +1011,26 @@ def _build_parser() -> argparse.ArgumentParser:
         help=(
             "Output the structured sync result as JSON to stdout instead of the "
             "human-readable summary (for programmatic/scheduled callers)."
+        ),
+    )
+    p.add_argument(
+        "--rules-file",
+        metavar="PATH",
+        default=None,
+        help=(
+            "Path to a JSON file containing a list of discovery rule objects -- "
+            "the SAME shape `discover --rules-file` already uses, e.g. "
+            '[{"owner": "microsoft", "match": "amplifier*", "include_forks": true, '
+            '"visibility": "all"}]. This file is authored and OWNED BY THE CALLER '
+            "-- repo-weaver does not define, validate, or persist a discovery "
+            "config schema; it only loads and applies whatever rules you pass in, "
+            "each invocation. When supplied, `sync` first discovers repos "
+            "matching these rules, onboards any genuinely NEW repo (a one-time "
+            "full-history weave to seed its first digest), then proceeds with "
+            "the normal per-repo-watermark sync pass over the full tracked set "
+            "(pre-existing + newly onboarded) -- closing the discover -> weave "
+            "-> sync onboarding gap in a single command. Omit this flag for the "
+            "original sync-only behaviour (unchanged, no discovery performed)."
         ),
     )
     p.set_defaults(func=cmd_sync)
