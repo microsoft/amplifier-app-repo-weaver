@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+
+      - name: Install dependencies
+        # Unlike wiki-weaver's hermetic (--no-deps) CI, repo-weaver's package
+        # unconditionally imports wiki_weaver at module import time
+        # (repo_weaver/__init__.py -> weave.py -> wiki_weaver.lib), with no
+        # self-skip logic anywhere in the test suite. A --no-deps install
+        # fails ALL 15 test files at collection with ModuleNotFoundError
+        # (verified directly before writing this file). Doing a full `uv
+        # sync` -- which resolves the real git dependency chain
+        # (repo-weaver -> wiki-weaver -> amplifier-foundation +
+        # amplifier-unified-llm-client, all @main) -- was measured at ~10s
+        # for install + ~8s for the full test run in a clean environment,
+        # so the "slow + network-flaky" tradeoff wiki-weaver's own CI
+        # comment warns about does not materialize here. hatchling is
+        # needed too: tests/test_hatch_build.py imports
+        # BuildHookInterface to unit-test hatch_build.py's git-derived-
+        # version build hook (it's already a [build-system] requirement,
+        # but that's only installed into the isolated build env, not this
+        # one) -- it's already declared in [dependency-groups].dev.
+        run: uv sync --group dev
+
+      - name: Run tests
+        run: uv run pytest -q
