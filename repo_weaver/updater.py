@@ -36,6 +36,8 @@ import sys
 from dataclasses import dataclass, field
 from typing import Optional
 
+from ._version_resolve import _BAKED_PATTERN
+
 # ---------------------------------------------------------------------------
 # Source registry
 # ---------------------------------------------------------------------------
@@ -370,79 +372,59 @@ def update_wiki_weaver(*, check_only: bool = False) -> int:
 # relative to its own @main -- a distinct failure mode from ordinary
 # staleness that plain per-source freshness checks can't answer.
 #
-# wiki-weaver's own `--version` is a static "wiki-weaver 0.1.0" string that
-# does NOT reflect @main commit drift, and its `doctor` reports wheel-dep +
-# bundle commits but never its OWN installed commit -- so neither surface
-# gives a usable identifier for the standalone CLI's commit.  The only
-# reliable source of truth is the same PEP 610 direct_url.json mechanism
-# _installed_commit() already uses, read from the *wiki-weaver CLI's own
-# venv* (found via its installed script's shebang line -- the standard
-# mechanism console-script wrappers use to locate their interpreter).
+# wiki-weaver's `--version` now bakes a real git-derived `YYYY.MM.DD-<sha>`
+# string at build time (the same mechanism this repo's own
+# _version_resolve.py uses for itself) -- so a direct `wiki-weaver --version`
+# call is a reliable identifier for the on-PATH CLI's commit era. This
+# replaces an earlier, more fragile mechanism: shebang-parsing the installed
+# script to find its venv's interpreter, then probing that interpreter for
+# its own PEP 610 direct_url.json. That workaround existed only because
+# wiki-weaver's `--version` used to be a static, useless "wiki-weaver 0.1.0"
+# string; now that it's real, the indirect probe is unnecessary.
 
 
-def _wiki_weaver_cli_interpreter() -> tuple[Optional[str], Optional[str]]:
-    """Return (interpreter_path, error) for the venv backing `wiki-weaver` on PATH."""
-    exe = shutil.which(_WIKI_WEAVER_CLI_NAME)
-    if exe is None:
-        return None, "wiki-weaver not found on PATH"
-    try:
-        with open(exe, encoding="utf-8", errors="replace") as f:
-            first_line = f.readline().strip()
-    except OSError as e:
-        return None, f"could not read wiki-weaver script header: {e}"
-    if not first_line.startswith("#!"):
-        return (
-            None,
-            "wiki-weaver is not a shebang script -- cannot locate its venv interpreter",
-        )
-    return first_line[2:].strip(), None
+def _wiki_weaver_cli_version() -> tuple[Optional[str], Optional[str]]:
+    """Return (version, error) for the `wiki-weaver` CLI found on PATH.
 
-
-_PEP610_PROBE = (
-    "import importlib.metadata, json, sys\n"
-    "try:\n"
-    "    d = importlib.metadata.distribution('wiki-weaver')\n"
-    "    raw = d.read_text('direct_url.json')\n"
-    "    sys.stdout.write(raw or '')\n"
-    "except Exception:\n"
-    "    sys.exit(1)\n"
-)
-
-
-def _wiki_weaver_cli_commit() -> tuple[Optional[str], Optional[str]]:
-    """Read the installed commit SHA of the wiki-weaver CLI-on-PATH.
-
-    Returns ``(commit_or_None, error_or_None)``.  Never raises.
+    Runs ``wiki-weaver --version`` directly and parses its baked
+    ``YYYY.MM.DD-<short-sha>`` output. Returns ``(None, error)`` when
+    wiki-weaver isn't on PATH, the subprocess fails, or the output doesn't
+    match the expected baked-version pattern (e.g. a stale install that
+    predates version-baking and still prints a placeholder) -- fail loud and
+    labeled rather than guessing. Never raises.
     """
-    interpreter, err = _wiki_weaver_cli_interpreter()
-    if interpreter is None:
-        return None, err
+    if shutil.which(_WIKI_WEAVER_CLI_NAME) is None:
+        return None, "wiki-weaver not found on PATH"
 
     try:
-        r = subprocess.run(
-            [interpreter, "-c", _PEP610_PROBE], capture_output=True, text=True
-        )  # noqa: S603
-    except OSError as e:
-        return None, f"could not run wiki-weaver's interpreter: {e}"
+        r = subprocess.run(  # noqa: S603
+            [_WIKI_WEAVER_CLI_NAME, "--version"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return None, f"could not run `wiki-weaver --version`: {e}"
 
-    if r.returncode != 0 or not r.stdout.strip():
+    if r.returncode != 0:
         return (
             None,
-            "could not read wiki-weaver's installed commit (direct_url.json unavailable)",
+            f"`wiki-weaver --version` exited {r.returncode}: {r.stderr.strip()[:200]}",
         )
 
-    try:
-        info = json.loads(r.stdout.strip())
-    except json.JSONDecodeError:
-        return None, "wiki-weaver's direct_url.json was not parseable JSON"
+    stdout = r.stdout.strip()
+    # Expected format: "wiki-weaver <version>" -- strip the leading program name.
+    _, _, version = stdout.partition(" ")
+    version = version.strip() or stdout
 
-    commit = info.get("vcs_info", {}).get("commit_id")
-    if not commit:
+    if not _BAKED_PATTERN.match(version):
         return (
             None,
-            "wiki-weaver's install has no vcs_info.commit_id (not a git install?)",
+            f"wiki-weaver --version output ({stdout!r}) doesn't match the "
+            "expected baked-version pattern (YYYY.MM.DD-<sha>) -- it may be "
+            "an old install that predates version-baking",
         )
-    return commit, None
+    return version, None
 
 
 @dataclass
@@ -451,30 +433,43 @@ class DriftCheck:
 
     bundled_commit: Optional[str] = None
     """Commit of the wiki-weaver dependency baked into repo-weaver's own install."""
-    cli_commit: Optional[str] = None
-    """Commit of the standalone wiki-weaver CLI found on PATH."""
+    cli_version: Optional[str] = None
+    """Baked ``YYYY.MM.DD-<short-sha>`` string from `wiki-weaver --version`."""
     error: Optional[str] = None
-    """Set when the CLI-on-PATH commit could not be determined."""
+    """Set when the CLI-on-PATH version could not be determined."""
+
+    @property
+    def cli_short_sha(self) -> Optional[str]:
+        """The short-sha suffix of ``cli_version`` (after the last '-')."""
+        if not self.cli_version:
+            return None
+        return self.cli_version.rsplit("-", 1)[-1]
 
     @property
     def drifted(self) -> Optional[bool]:
-        """True/False when both commits are known; None when undetermined."""
-        if self.bundled_commit and self.cli_commit:
-            return self.bundled_commit != self.cli_commit
+        """True/False when both sides are known; None when undetermined.
+
+        wiki-weaver's baked ``--version`` carries only a *short* sha, while
+        repo-weaver's bundled-dependency commit (from PEP 610) is a full
+        40-char sha -- so this is a prefix comparison, not equality.
+        """
+        short = self.cli_short_sha
+        if self.bundled_commit and short:
+            return not self.bundled_commit.lower().startswith(short.lower())
         return None
 
 
 def check_wiki_weaver_drift() -> DriftCheck:
-    """Compare repo-weaver's bundled wiki-weaver commit vs the CLI-on-PATH's.
+    """Compare repo-weaver's bundled wiki-weaver commit vs the CLI-on-PATH's version.
 
-    Local only (PEP 610 reads + one subprocess for the on-PATH interpreter --
+    Local only (one PEP 610 read + one `wiki-weaver --version` subprocess --
     no network), so this stays fast enough for ``doctor``.
     """
     check = DriftCheck()
     check.bundled_commit = _installed_commit(_WIKI_WEAVER_DIST_NAME)
-    cli_commit, err = _wiki_weaver_cli_commit()
-    check.cli_commit = cli_commit
-    if cli_commit is None:
+    cli_version, err = _wiki_weaver_cli_version()
+    check.cli_version = cli_version
+    if cli_version is None:
         check.error = err
     return check
 

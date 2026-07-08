@@ -16,9 +16,6 @@ filesystem access beyond ``tmp_path`` fixtures. ``subprocess.run`` /
 from __future__ import annotations
 
 import json
-import stat
-import sys
-from pathlib import Path
 from typing import Optional
 from unittest.mock import MagicMock
 
@@ -29,8 +26,7 @@ from repo_weaver.updater import (
     Layer1Result,
     SourceRecord,
     _installed_commit,
-    _wiki_weaver_cli_commit,
-    _wiki_weaver_cli_interpreter,
+    _wiki_weaver_cli_version,
     check_wiki_weaver_drift,
     update_layer1,
     update_wiki_weaver,
@@ -448,88 +444,55 @@ class TestUpdateWikiWeaver:
 
 
 # ---------------------------------------------------------------------------
-# _wiki_weaver_cli_interpreter: shebang parsing for the on-PATH venv
+# _wiki_weaver_cli_version: direct `wiki-weaver --version` probe
 # ---------------------------------------------------------------------------
 
 
-class TestWikiWeaverCliInterpreter:
+class TestWikiWeaverCliVersion:
     def test_not_found_when_wiki_weaver_missing(self, monkeypatch):
         monkeypatch.setattr("repo_weaver.updater.shutil.which", lambda name: None)
-        interpreter, err = _wiki_weaver_cli_interpreter()
-        assert interpreter is None
+        version, err = _wiki_weaver_cli_version()
+        assert version is None
         assert "not found on PATH" in (err or "")
 
-    def test_parses_shebang_line(self, tmp_path: Path, monkeypatch):
-        script = tmp_path / "wiki-weaver"
-        script.write_text(
-            "#!/fake/venv/bin/python3\nimport sys\nsys.exit(0)\n",
-            encoding="utf-8",
-        )
-        script.chmod(script.stat().st_mode | stat.S_IEXEC)
+    def test_returns_version_from_baked_output(self, monkeypatch):
         monkeypatch.setattr(
-            "repo_weaver.updater.shutil.which", lambda name: str(script)
+            "repo_weaver.updater.shutil.which", lambda name: "/fake/bin/wiki-weaver"
         )
-        interpreter, err = _wiki_weaver_cli_interpreter()
-        assert err is None
-        assert interpreter == "/fake/venv/bin/python3"
-
-    def test_error_when_not_a_shebang_script(self, tmp_path: Path, monkeypatch):
-        script = tmp_path / "wiki-weaver"
-        script.write_text("not a shebang\n", encoding="utf-8")
-        monkeypatch.setattr(
-            "repo_weaver.updater.shutil.which", lambda name: str(script)
-        )
-        interpreter, err = _wiki_weaver_cli_interpreter()
-        assert interpreter is None
-        assert "shebang" in (err or "")
-
-
-# ---------------------------------------------------------------------------
-# _wiki_weaver_cli_commit: reads PEP 610 info from the on-PATH venv
-# ---------------------------------------------------------------------------
-
-
-class TestWikiWeaverCliCommit:
-    def test_returns_none_when_interpreter_not_found(self, monkeypatch):
-        monkeypatch.setattr(
-            "repo_weaver.updater._wiki_weaver_cli_interpreter",
-            lambda: (None, "wiki-weaver not found on PATH"),
-        )
-        commit, err = _wiki_weaver_cli_commit()
-        assert commit is None
-        assert err == "wiki-weaver not found on PATH"
-
-    def test_returns_commit_from_probe_subprocess(self, monkeypatch):
-        monkeypatch.setattr(
-            "repo_weaver.updater._wiki_weaver_cli_interpreter",
-            lambda: (sys.executable, None),
-        )
-        commit_id = "f" * 40
-        direct_url = {
-            "url": "https://github.com/microsoft/amplifier-app-wiki-weaver",
-            "vcs_info": {"vcs": "git", "commit_id": commit_id},
-        }
         monkeypatch.setattr(
             "repo_weaver.updater.subprocess.run",
             lambda cmd, **kw: MagicMock(
-                returncode=0, stdout=json.dumps(direct_url), stderr=""
+                returncode=0, stdout="wiki-weaver 2026.07.08-047db6b\n", stderr=""
             ),
         )
-        commit, err = _wiki_weaver_cli_commit()
-        assert commit == commit_id
+        version, err = _wiki_weaver_cli_version()
+        assert version == "2026.07.08-047db6b"
         assert err is None
 
-    def test_returns_error_when_probe_fails(self, monkeypatch):
+    def test_error_when_output_does_not_match_baked_pattern(self, monkeypatch):
         monkeypatch.setattr(
-            "repo_weaver.updater._wiki_weaver_cli_interpreter",
-            lambda: (sys.executable, None),
+            "repo_weaver.updater.shutil.which", lambda name: "/fake/bin/wiki-weaver"
         )
         monkeypatch.setattr(
             "repo_weaver.updater.subprocess.run",
-            lambda cmd, **kw: MagicMock(returncode=1, stdout="", stderr=""),
+            lambda cmd, **kw: MagicMock(
+                returncode=0, stdout="wiki-weaver 0.1.0\n", stderr=""
+            ),
         )
-        commit, err = _wiki_weaver_cli_commit()
-        assert commit is None
+        version, err = _wiki_weaver_cli_version()
+        assert version is None
+        assert "doesn't match the expected baked-version pattern" in (err or "")
+
+    def test_error_when_subprocess_exits_nonzero(self, monkeypatch):
+        monkeypatch.setattr(
+            "repo_weaver.updater.shutil.which", lambda name: "/fake/bin/wiki-weaver"
+        )
+        monkeypatch.setattr(
+            "repo_weaver.updater.subprocess.run",
+            lambda cmd, **kw: MagicMock(returncode=1, stdout="", stderr="boom"),
+        )
+        version, err = _wiki_weaver_cli_version()
+        assert version is None
         assert err is not None
 
 
@@ -539,35 +502,38 @@ class TestWikiWeaverCliCommit:
 
 
 class TestCheckWikiWeaverDrift:
-    def test_drift_true_when_commits_differ(self, monkeypatch):
+    def test_drift_true_when_short_sha_does_not_match_bundled_commit(self, monkeypatch):
         monkeypatch.setattr(
             "repo_weaver.updater._installed_commit", lambda name: "a" * 40
         )
         monkeypatch.setattr(
-            "repo_weaver.updater._wiki_weaver_cli_commit",
-            lambda: ("b" * 40, None),
+            "repo_weaver.updater._wiki_weaver_cli_version",
+            lambda: ("2026.07.08-bbbbbbb", None),
         )
         drift = check_wiki_weaver_drift()
         assert isinstance(drift, DriftCheck)
         assert drift.drifted is True
         assert drift.bundled_commit == "a" * 40
-        assert drift.cli_commit == "b" * 40
+        assert drift.cli_version == "2026.07.08-bbbbbbb"
 
-    def test_drift_false_when_commits_match(self, monkeypatch):
-        sha = "c" * 40
-        monkeypatch.setattr("repo_weaver.updater._installed_commit", lambda name: sha)
+    def test_drift_false_when_short_sha_is_prefix_of_bundled_commit(self, monkeypatch):
+        full_sha = "c0ffee7" + "c" * 33
         monkeypatch.setattr(
-            "repo_weaver.updater._wiki_weaver_cli_commit", lambda: (sha, None)
+            "repo_weaver.updater._installed_commit", lambda name: full_sha
+        )
+        monkeypatch.setattr(
+            "repo_weaver.updater._wiki_weaver_cli_version",
+            lambda: ("2026.07.08-c0ffee7", None),
         )
         drift = check_wiki_weaver_drift()
         assert drift.drifted is False
 
-    def test_drift_undetermined_when_cli_commit_unavailable(self, monkeypatch):
+    def test_drift_undetermined_when_cli_version_unavailable(self, monkeypatch):
         monkeypatch.setattr(
             "repo_weaver.updater._installed_commit", lambda name: "a" * 40
         )
         monkeypatch.setattr(
-            "repo_weaver.updater._wiki_weaver_cli_commit",
+            "repo_weaver.updater._wiki_weaver_cli_version",
             lambda: (None, "wiki-weaver not found on PATH"),
         )
         drift = check_wiki_weaver_drift()
@@ -577,10 +543,10 @@ class TestCheckWikiWeaverDrift:
     def test_drift_undetermined_when_bundled_commit_unavailable(self, monkeypatch):
         monkeypatch.setattr("repo_weaver.updater._installed_commit", lambda name: None)
         monkeypatch.setattr(
-            "repo_weaver.updater._wiki_weaver_cli_commit",
-            lambda: ("b" * 40, None),
+            "repo_weaver.updater._wiki_weaver_cli_version",
+            lambda: ("2026.07.08-bbbbbbb", None),
         )
         drift = check_wiki_weaver_drift()
         assert drift.drifted is None
         assert drift.bundled_commit is None
-        assert drift.cli_commit == "b" * 40
+        assert drift.cli_version == "2026.07.08-bbbbbbb"
