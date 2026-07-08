@@ -322,13 +322,37 @@ def sync_corpus(
                 else per_repo_since.get((owner, name), last_sync)
             )
 
-            if pushed_date and pushed_date > effective_since:
-                name_with_owner_raw = r.get("nameWithOwner")
-                name_with_owner = (
-                    name_with_owner_raw
-                    if isinstance(name_with_owner_raw, str) and name_with_owner_raw
-                    else f"{owner}/{name}"
-                )
+            name_with_owner_raw = r.get("nameWithOwner")
+            name_with_owner = (
+                name_with_owner_raw
+                if isinstance(name_with_owner_raw, str) and name_with_owner_raw
+                else f"{owner}/{name}"
+            )
+
+            push_changed = bool(pushed_date and pushed_date > effective_since)
+
+            # Cheap gating check: PR/issue discussion activity (comments,
+            # reviews, label changes) bumps that item's own `updatedAt` even
+            # when NO new commit was pushed. 2 lightweight `gh` calls per
+            # tracked repo -- not a full history enumeration. A genuine gh
+            # failure here is recorded loudly in `errors` but does not abort
+            # this repo's detection: the pushedAt signal (if any) still
+            # stands, and other repos/owners are unaffected.
+            pr_updated, pr_err = gitio.gh_most_recent_update(name_with_owner, "pr")
+            if pr_err is not None:
+                errors.append(f"{name_with_owner}: {pr_err}")
+            issue_updated, issue_err = gitio.gh_most_recent_update(
+                name_with_owner, "issue"
+            )
+            if issue_err is not None:
+                errors.append(f"{name_with_owner}: {issue_err}")
+
+            discussion_changed = bool(
+                (pr_updated and pr_updated > effective_since)
+                or (issue_updated and issue_updated > effective_since)
+            )
+
+            if push_changed or discussion_changed:
                 changed.append(
                     {
                         "owner": owner,

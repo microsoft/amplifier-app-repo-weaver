@@ -16,7 +16,7 @@ import json
 import re
 import subprocess
 import time
-from typing import Callable, Optional
+from typing import Callable, Literal, Optional
 
 
 # ---------------------------------------------------------------------------
@@ -368,6 +368,262 @@ def gh_merged_prs(
             result.append(pr)
 
     return result, None
+
+
+def gh_most_recent_update(
+    owner_repo: str,
+    kind: Literal["pr", "issue"],
+) -> tuple[Optional[str], Optional[str]]:
+    """Return the ``YYYY-MM-DD`` of the single most-recently-updated PR or issue.
+
+    This is the CHEAP gating check for change-detection: GitHub bumps a PR or
+    issue's own ``updatedAt`` field on *any* comment, review, or label change
+    -- not only on new commits. Comparing this single date against a repo's
+    last-sync watermark lets callers (:func:`repo_weaver.sync.sync_corpus`)
+    detect "did discussion activity happen" with ONE lightweight ``gh`` call
+    per kind (2 total per repo per sync), instead of enumerating every open
+    item's full history.
+
+    *owner_repo* is the ``owner/repo`` string. *kind* selects ``gh pr list``
+    (``"pr"``) or ``gh issue list`` (``"issue"``); both support identical
+    ``--search "sort:updated-desc"`` + ``--limit 1`` semantics.
+
+    Returns a ``(date_str, error)`` tuple:
+
+    * ``(date_str, None)`` -- gh ran successfully and found at least one
+      PR/issue; *date_str* is that item's ``updatedAt`` truncated to
+      ``YYYY-MM-DD``.
+    * ``(None, None)``     -- gh ran successfully but the repo genuinely has
+      zero PRs/issues of this kind. This is NOT an error -- a repo can
+      legitimately have no issues (or no PRs) at all.
+    * ``(None, error)``    -- gh exited non-zero (after retries) or produced
+      unparsable output; *error* carries a human-readable reason. Callers
+      **must** surface this loudly rather than silently treating it as
+      "no activity".
+    """
+    subcommand = "pr" if kind == "pr" else "issue"
+    cmd = [
+        "gh",
+        subcommand,
+        "list",
+        "--repo",
+        owner_repo,
+        "--state",
+        "all",
+        "--json",
+        "updatedAt",
+        "--limit",
+        "1",
+        "--search",
+        "sort:updated-desc",
+    ]
+    r = _run_gh_with_retry(cmd)
+    if r.returncode != 0:
+        raw_err = (r.stderr or r.stdout or "").strip()
+        first_line = (
+            raw_err.splitlines()[0][:200]
+            if raw_err
+            else "gh exited non-zero with no message"
+        )
+        return None, f"gh error: {first_line}"
+
+    if not r.stdout.strip():
+        # gh succeeded but returned nothing -- genuinely zero PRs/issues.
+        return None, None
+
+    try:
+        items: list[dict[str, object]] = json.loads(r.stdout)
+    except json.JSONDecodeError as exc:
+        return None, f"gh error: could not parse JSON response ({exc})"
+
+    if not items:
+        return None, None
+
+    updated_at = items[0].get("updatedAt")
+    if not isinstance(updated_at, str) or len(updated_at) < 10:
+        return None, None
+    return updated_at[:10], None
+
+
+def gh_pr_discussion(
+    owner_repo: str,
+    pr_number: int,
+) -> tuple[dict[str, list[dict[str, object]]], Optional[str]]:
+    """Fetch a single PR's comments and reviews in one ``gh pr view`` call.
+
+    Both ``comments`` and ``reviews`` are natively supported fields on a
+    single ``gh pr view --json`` invocation -- no need for two separate
+    requests. Only called for PRs already known to fall inside an
+    already-determined active sync window (bounded fetch, not full history).
+
+    Returns a ``(discussion, error)`` tuple:
+
+    * ``(discussion, None)`` -- gh ran successfully; *discussion* is
+      ``{"comments": [...], "reviews": [...]}``. Either list may genuinely
+      be empty (a PR with no comments/reviews) -- that is NOT an error.
+    * ``({"comments": [], "reviews": []}, error)`` -- gh exited non-zero
+      (after retries) or produced unparsable output; *error* carries a
+      human-readable reason. Callers **must** surface this loudly rather
+      than silently treating it as "no discussion".
+    """
+    empty: dict[str, list[dict[str, object]]] = {"comments": [], "reviews": []}
+    cmd = [
+        "gh",
+        "pr",
+        "view",
+        str(pr_number),
+        "--repo",
+        owner_repo,
+        "--json",
+        "comments,reviews",
+    ]
+    r = _run_gh_with_retry(cmd)
+    if r.returncode != 0:
+        raw_err = (r.stderr or r.stdout or "").strip()
+        first_line = (
+            raw_err.splitlines()[0][:200]
+            if raw_err
+            else "gh exited non-zero with no message"
+        )
+        return empty, f"gh error: {first_line}"
+
+    if not r.stdout.strip():
+        return empty, None
+
+    try:
+        data: dict[str, object] = json.loads(r.stdout)
+    except json.JSONDecodeError as exc:
+        return empty, f"gh error: could not parse JSON response ({exc})"
+
+    comments = data.get("comments")
+    reviews = data.get("reviews")
+    return {
+        "comments": comments if isinstance(comments, list) else [],
+        "reviews": reviews if isinstance(reviews, list) else [],
+    }, None
+
+
+def gh_issues(
+    owner_repo: str,
+    since: str,
+    until: str,
+    max_fetch: int = 120,
+) -> tuple[list[dict[str, object]], Optional[str]]:
+    """Fetch issues from GitHub whose ``updatedAt`` date falls in (since, until].
+
+    Mirrors :func:`gh_merged_prs`'s date-windowing pattern: fetch up to
+    *max_fetch* issues (capped at 200), sorted by most-recently-updated,
+    via the GitHub search ``updated:<since>..<until>`` range, then
+    re-verify the window client-side (belt-and-suspenders -- never trust
+    search-syntax parsing alone to be the sole gate).
+
+    Returns an ``(issues, error)`` tuple, mirroring :func:`gh_merged_prs`:
+
+    * ``(issues, None)`` -- gh ran successfully; *issues* may be an empty
+      list when the window genuinely contains no updated issues.
+    * ``([], error)``    -- gh exited non-zero (after retries) or produced
+      unparsable output; *error* carries a human-readable reason. Callers
+      **must** surface this loudly rather than silently treating it as
+      "zero issues".
+    """
+    fetch_limit = min(max(max_fetch, 60), 200)
+    cmd = [
+        "gh",
+        "issue",
+        "list",
+        "--repo",
+        owner_repo,
+        "--state",
+        "all",
+        "--json",
+        "number,title,body,createdAt,updatedAt,author",
+        "--limit",
+        str(fetch_limit),
+        "--search",
+        f"updated:{since}..{until} sort:updated-desc",
+    ]
+    r = _run_gh_with_retry(cmd)
+    if r.returncode != 0:
+        raw_err = (r.stderr or r.stdout or "").strip()
+        first_line = (
+            raw_err.splitlines()[0][:200]
+            if raw_err
+            else "gh exited non-zero with no message"
+        )
+        return [], f"gh error: {first_line}"
+
+    if not r.stdout.strip():
+        # gh succeeded but returned nothing -- genuinely zero issues.
+        return [], None
+
+    try:
+        issues: list[dict[str, object]] = json.loads(r.stdout)
+    except json.JSONDecodeError as exc:
+        return [], f"gh error: could not parse JSON response ({exc})"
+
+    # Belt-and-suspenders re-check: the --search window should already
+    # constrain results, but re-verify against updatedAt so a search-syntax
+    # edge case never silently admits an out-of-window issue.
+    result: list[dict[str, object]] = []
+    for issue in issues:
+        updated = issue.get("updatedAt") or ""
+        if not isinstance(updated, str) or len(updated) < 10:
+            continue
+        updated_date = updated[:10]
+        if since < updated_date <= until:
+            result.append(issue)
+
+    return result, None
+
+
+def gh_issue_discussion(
+    owner_repo: str,
+    issue_number: int,
+) -> tuple[list[dict[str, object]], Optional[str]]:
+    """Fetch a single issue's comments via ``gh issue view --json comments``.
+
+    Only called for issues already known to fall inside an
+    already-determined active sync window (bounded fetch, not full history).
+
+    Returns a ``(comments, error)`` tuple:
+
+    * ``(comments, None)`` -- gh ran successfully; *comments* may genuinely
+      be an empty list (an issue with no comments) -- that is NOT an error.
+    * ``([], error)``      -- gh exited non-zero (after retries) or produced
+      unparsable output; *error* carries a human-readable reason. Callers
+      **must** surface this loudly rather than silently treating it as
+      "no comments".
+    """
+    cmd = [
+        "gh",
+        "issue",
+        "view",
+        str(issue_number),
+        "--repo",
+        owner_repo,
+        "--json",
+        "comments",
+    ]
+    r = _run_gh_with_retry(cmd)
+    if r.returncode != 0:
+        raw_err = (r.stderr or r.stdout or "").strip()
+        first_line = (
+            raw_err.splitlines()[0][:200]
+            if raw_err
+            else "gh exited non-zero with no message"
+        )
+        return [], f"gh error: {first_line}"
+
+    if not r.stdout.strip():
+        return [], None
+
+    try:
+        data: dict[str, object] = json.loads(r.stdout)
+    except json.JSONDecodeError as exc:
+        return [], f"gh error: could not parse JSON response ({exc})"
+
+    comments = data.get("comments")
+    return (comments if isinstance(comments, list) else []), None
 
 
 def gh_list_repos(
