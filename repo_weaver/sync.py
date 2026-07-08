@@ -140,6 +140,123 @@ def _ensure_local_clone(clone_path: Path, name_with_owner: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Onboarding: discover + seed new repos (composes discover_repos + weave)
+# ---------------------------------------------------------------------------
+
+
+def _owner_name_from_matched(repo: dict[str, object]) -> Optional[tuple[str, str, str]]:
+    """Parse ``(owner, name, nameWithOwner)`` from a :func:`gitio.discover_repos`
+    match dict.
+
+    Prefers the dict's own ``name`` field for the repo name; falls back to
+    splitting ``nameWithOwner`` if ``name`` is missing or empty. Returns None
+    if ``nameWithOwner`` itself is missing or not in ``owner/repo`` form --
+    such an entry cannot be reliably tracked or cloned.
+    """
+    name_with_owner = repo.get("nameWithOwner")
+    if not isinstance(name_with_owner, str) or "/" not in name_with_owner:
+        return None
+    owner, _, nwo_name = name_with_owner.partition("/")
+    if not owner or not nwo_name:
+        return None
+    name = repo.get("name")
+    repo_name = name if isinstance(name, str) and name else nwo_name
+    return owner, repo_name, name_with_owner
+
+
+def _onboard_new_repos(
+    corpus: str,
+    corpus_path: Path,
+    clones_path: Path,
+    new_repos: list[tuple[str, str, str]],
+    until: str,
+    max_modules: int,
+) -> tuple[list[dict[str, object]], list[str]]:
+    """Seed a first digest for each genuinely-new repo via a one-time full-history weave.
+
+    *new_repos* is a list of ``(owner, name, nameWithOwner)`` tuples -- repos
+    :func:`gitio.discover_repos` matched that are NOT yet in the corpus's
+    tracked set. For each: ensure a local clone (reusing
+    :func:`_ensure_local_clone`, the same mechanism the regular changed-repo
+    path uses), then call :func:`repo_weaver.weave.weave` ONCE with
+    ``since=None`` -- matching a fresh ``weave()`` call's own default window
+    (one day before the repo's first commit), i.e. genuine full history, not
+    an incremental slice.
+
+    A clone or weave failure for one repo is recorded in *errors* and does
+    NOT abort onboarding of the remaining repos -- mirrors this module's
+    existing "collect failures, keep going" convention (see
+    :func:`sync_corpus`'s per-owner discovery loop).
+
+    Returns:
+        ``(onboarded, errors)`` -- *onboarded* has one entry per attempted
+        repo: ``{"owner", "repo", "nameWithOwner", "status"}`` where
+        ``status`` is ``"onboarded"`` (digest landed) or ``"failed"``
+        (clone or weave did not produce the expected digest). *errors* is a
+        list of human-readable failure strings, empty when every onboarding
+        attempt succeeded.
+    """
+    onboarded: list[dict[str, object]] = []
+    errors: list[str] = []
+    if not new_repos:
+        return onboarded, errors
+
+    clones_path.mkdir(parents=True, exist_ok=True)
+    sources_dir = wiki_sources(corpus_path)
+
+    for owner, name, name_with_owner in new_repos:
+        clone_path = clones_path / f"{owner}__{name}"
+
+        if not _ensure_local_clone(clone_path, name_with_owner):
+            errors.append(f"{name_with_owner}: onboarding clone failed")
+            onboarded.append(
+                {
+                    "owner": owner,
+                    "repo": name,
+                    "nameWithOwner": name_with_owner,
+                    "status": "failed",
+                }
+            )
+            continue
+
+        rc = _weave(
+            corpus=corpus,
+            repo=str(clone_path),
+            since=None,
+            until=until,
+            max_modules=max_modules,
+            dry_run=False,
+        )
+
+        expected_filename = f"{owner}__{name}-{until}-changes.md"
+        landed = (sources_dir / expected_filename).exists()
+        if landed:
+            onboarded.append(
+                {
+                    "owner": owner,
+                    "repo": name,
+                    "nameWithOwner": name_with_owner,
+                    "status": "onboarded",
+                }
+            )
+        else:
+            errors.append(
+                f"{name_with_owner}: onboarding weave failed (returncode {rc}); "
+                "expected digest never landed in _sources/"
+            )
+            onboarded.append(
+                {
+                    "owner": owner,
+                    "repo": name,
+                    "nameWithOwner": name_with_owner,
+                    "status": "failed",
+                }
+            )
+
+    return onboarded, errors
+
+
+# ---------------------------------------------------------------------------
 # sync_corpus
 # ---------------------------------------------------------------------------
 
@@ -151,6 +268,7 @@ def sync_corpus(
     until: Optional[str] = None,
     dry_run: bool = False,
     max_modules: int = 0,
+    rules: Optional[list[dict[str, object]]] = None,
 ) -> dict[str, Any]:
     """Re-weave only the repos that changed since each repo's OWN last sync.
 
@@ -158,6 +276,15 @@ def sync_corpus(
     filenames already record, per repo, the last date it was woven through
     (baked into the filename). This function:
 
+    0. If *rules* is supplied, first closes the discover -> onboard gap: runs
+       :func:`repo_weaver.gitio.discover_repos` with those rules, diffs the
+       matches against the corpus's ALREADY-tracked set, and for each
+       genuinely NEW repo performs a one-time full-history
+       :func:`repo_weaver.weave.weave` to seed its first digest (see
+       :func:`_onboard_new_repos`). The tracked set used by steps 1-4 below
+       is (re)computed AFTER this step, so newly onboarded repos are part of
+       the SAME run's normal sync pass, not left for "next time". Omit
+       *rules* for the original discovery-free behaviour (unchanged).
     1. Determines each tracked repo's own last-sync date -- *since* if given
        (applied globally as an explicit override), else the max ``YYYY-MM-DD``
        parsed from THAT repo's own ``_sources/*-changes.md`` filenames. Repos
@@ -180,10 +307,12 @@ def sync_corpus(
     Args:
         corpus:      Path to the wiki corpus directory (must already exist
                      and have at least one change-digest source, unless
-                     *since* is supplied explicitly).
+                     *since* is supplied explicitly, or *rules* onboards at
+                     least one new repo this run).
         clones_dir:  Directory to hold/locate local clones, one subdirectory
                      per changed repo (``<clones_dir>/<owner>__<repo>``).
-                     ``~`` is expanded.
+                     ``~`` is expanded. Also used for onboarding clones when
+                     *rules* is supplied.
         since:       Override for the last-sync date (``YYYY-MM-DD``,
                      exclusive), applied globally to every tracked repo --
                      an explicit override is an intentional caller directive
@@ -191,10 +320,21 @@ def sync_corpus(
                      Defaults to per-repo corpus-derived values.
         until:       Window end (inclusive). Defaults to today (UTC date).
         dry_run:     If True, detect and report the changed-repo list but do
-                     NOT clone or weave anything.
+                     NOT clone or weave anything. Also applies to onboarding:
+                     new repos are reported (status ``"would_onboard"``) but
+                     not cloned or woven.
         max_modules: Module snapshot cap forwarded to ``weave()`` for each
                      changed repo (default 0 -- changes-only, no module
-                     snapshots, matching the "fast sync" use case).
+                     snapshots, matching the "fast sync" use case). Also
+                     forwarded to each new repo's onboarding weave.
+        rules:       Optional list of discovery rule dicts, SAME shape
+                     ``discover --rules-file`` already uses (see
+                     :func:`repo_weaver.gitio.discover_repos`). repo-weaver
+                     does not own/persist this config -- the caller supplies
+                     it fresh each invocation, same mechanism-not-policy
+                     stance as ``discover``. When omitted (default), no
+                     discovery/onboarding happens -- behaviour is identical
+                     to before this parameter existed.
 
     Returns:
         A result dict:
@@ -217,11 +357,13 @@ def sync_corpus(
                                                      own effective last-sync
                                                      date, used for its weave
                                                      window).
-            ``errors``            (list[str])     -- non-fatal owner-level
-                                                     notes (e.g. gh returned
-                                                     nothing for an owner with
-                                                     tracked repos, or a
-                                                     genuine gh failure).
+            ``errors``            (list[str])     -- non-fatal notes (e.g. gh
+                                                     returned nothing for an
+                                                     owner with tracked repos,
+                                                     a genuine gh failure, a
+                                                     discovery-rule failure,
+                                                     or an onboarding clone/
+                                                     weave failure).
             ``discovery_failed``  (list[str])     -- owners for which ``gh``
                                                      genuinely failed (auth,
                                                      rate-limit, network,
@@ -233,6 +375,28 @@ def sync_corpus(
                                                      incomplete for those
                                                      owners; callers (e.g. the
                                                      CLI) should exit non-zero.
+            ``onboarded``         (list[dict])    -- one entry per NEW repo
+                                                     *rules* discovered this
+                                                     run (empty when *rules*
+                                                     is omitted or every
+                                                     match was already
+                                                     tracked): ``{"owner",
+                                                     "repo", "nameWithOwner",
+                                                     "status"}`` where
+                                                     ``status`` is
+                                                     ``"onboarded"`` (digest
+                                                     seeded), ``"failed"``
+                                                     (clone/weave did not
+                                                     produce the digest), or
+                                                     ``"would_onboard"``
+                                                     (*dry_run* -- reported,
+                                                     not actually onboarded).
+                                                     Distinct from
+                                                     ``changed``/``woven``:
+                                                     a caller can tell "N
+                                                     onboarded vs M synced
+                                                     incrementally" from
+                                                     these two fields.
         When *dry_run* is False, additionally:
             ``woven``       (list[dict])        -- ``{"repo", "returncode"}`` per
                                                    changed repo actually woven.
@@ -241,11 +405,62 @@ def sync_corpus(
 
     Raises:
         ValueError: if *since* is not given and the corpus has no
-                    change-digest sources to derive a last-sync date from.
+                    change-digest sources to derive a last-sync date from
+                    (checked AFTER any onboarding from *rules*, so a corpus
+                    onboarding its very first repo(s) this run does not
+                    spuriously raise).
     """
     corpus_path = Path(corpus)
     clones_path = Path(clones_dir).expanduser()
+    effective_until = until if until is not None else date.today().isoformat()
 
+    onboarded: list[dict[str, object]] = []
+    onboarding_errors: list[str] = []
+    discovery_errors: list[str] = []
+
+    if rules is not None:
+        matched, discovery_errors = gitio.discover_repos(rules)
+        existing_tracked, _ = _tracked_repos(corpus_path)
+
+        new_repos: list[tuple[str, str, str]] = []
+        for repo in matched:
+            parsed = _owner_name_from_matched(repo)
+            if parsed is None:
+                continue
+            owner, name, name_with_owner = parsed
+            if (owner, name) in existing_tracked:
+                continue
+            new_repos.append((owner, name, name_with_owner))
+
+        if new_repos:
+            if dry_run:
+                onboarded = [
+                    {
+                        "owner": owner,
+                        "repo": name,
+                        "nameWithOwner": name_with_owner,
+                        "status": "would_onboard",
+                    }
+                    for owner, name, name_with_owner in new_repos
+                ]
+            else:
+                onboarded, onboarding_errors = _onboard_new_repos(
+                    corpus=corpus,
+                    corpus_path=corpus_path,
+                    clones_path=clones_path,
+                    new_repos=new_repos,
+                    until=effective_until,
+                    max_modules=max_modules,
+                )
+
+    # Tracked set + per-repo watermark are (re)computed HERE -- after any
+    # onboarding above -- so a freshly onboarded repo's own digest (just
+    # written to _sources/) is immediately part of the tracked set the
+    # normal watermark pass below evaluates. No separate merge step is
+    # needed: tracked-repo detection is purely filename-driven, and
+    # onboarding's side effect (a new *-changes.md file) is exactly the
+    # signal that mechanism already reads. When *rules* is None this is
+    # byte-for-byte the same computation the original implementation did.
     tracked, owners = _tracked_repos(corpus_path)
     per_repo_since = _per_repo_last_sync(corpus_path)
 
@@ -257,15 +472,14 @@ def sync_corpus(
             "at least once, or pass --since explicitly."
         )
 
-    effective_until = until if until is not None else date.today().isoformat()
-
     result: dict[str, Any] = {
         "last_sync": last_sync,
         "until": effective_until,
         "owners": {},
         "changed": [],
-        "errors": [],
+        "errors": list(discovery_errors) + list(onboarding_errors),
         "discovery_failed": [],
+        "onboarded": onboarded,
     }
 
     if not owners:
@@ -273,7 +487,7 @@ def sync_corpus(
         return result
 
     changed: list[dict[str, str]] = []
-    errors: list[str] = []
+    errors: list[str] = list(discovery_errors) + list(onboarding_errors)
     discovery_failed: list[str] = []
     per_owner_counts: dict[str, int] = {}
 

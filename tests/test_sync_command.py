@@ -37,6 +37,29 @@ SYNC9  Fail-loud ``gh`` discovery failures: a genuine ``gh_list_repos`` error
 
 SYNC10 ``sync --json`` emits a valid, parseable JSON result with the expected
        keys, and its exit code matches the human-readable path.
+
+SYNC11 ``sync --rules-file`` onboarding: a repo `discover_repos()` matches
+       that is NOT yet tracked gets a one-time full-history onboarding weave
+       (``since=None``), recorded distinctly in ``result["onboarded"]`` --
+       separate from the normal incremental ``changed``/``woven`` fields.
+
+SYNC12 ``sync --rules-file`` where every discovered repo is ALREADY tracked:
+       no onboarding weave happens (``onboarded == []``), and the normal
+       watermark-based sync pass proceeds exactly as if no rules were given.
+
+SYNC13 ``sync`` called WITHOUT ``rules`` never calls ``discover_repos`` and
+       always reports ``onboarded == []`` -- the additive parameter changes
+       nothing about the pre-existing code path (no regression).
+
+SYNC14 Onboarding fail-loud: one new repo's onboarding weave fails to
+       produce its digest -- recorded as ``status: "failed"`` in
+       ``onboarded`` and as a message in ``errors``, WITHOUT aborting the
+       onboarding of the other new repo(s) or the rest of the sync run.
+
+SYNC15 CLI wiring: ``cmd_sync`` reads ``--rules-file`` via the shared
+       ``_load_rules_file`` helper and forwards the parsed rules to
+       ``sync_corpus``; a missing/invalid rules file is a clear CLI error;
+       an onboarding failure recorded in the result forces a non-zero exit.
 """
 
 from __future__ import annotations
@@ -60,6 +83,23 @@ def _write_source(corpus: Path, filename: str) -> None:
     sources = corpus / "_sources"
     sources.mkdir(parents=True, exist_ok=True)
     (sources / filename).write_text("dummy content", encoding="utf-8")
+
+
+def _patch_no_discussion_activity(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stub the PR/issue discussion-gating check to report "no activity".
+
+    Every test in this file that monkeypatches ``gitio.gh_list_repos`` with
+    a list of tracked repos also exercises the CHANGED-selection loop in
+    ``sync_corpus``, which now calls ``gitio.gh_most_recent_update`` (2 gh
+    calls per tracked repo) as the cheap discussion-activity gate. Tests
+    that are not specifically exercising that gate stub it to "no PRs/issues
+    found" (``(None, None)``) so their assertions continue to reflect only
+    the pre-existing pushedAt-based CHANGED signal -- and so tests never
+    make real network calls to ``gh``.
+    """
+    monkeypatch.setattr(
+        gitio, "gh_most_recent_update", lambda owner_repo, kind: (None, None)
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -180,6 +220,7 @@ def test_sync_dry_run_selects_only_tracked_nonfork_pushed_since(
         return [], None
 
     monkeypatch.setattr(gitio, "gh_list_repos", fake_gh_list_repos)
+    _patch_no_discussion_activity(monkeypatch)
 
     result = sync.sync_corpus(
         corpus=str(corpus),
@@ -217,6 +258,7 @@ def test_sync_dry_run_does_not_clone_or_weave(
         ], None
 
     monkeypatch.setattr(gitio, "gh_list_repos", fake_gh_list_repos)
+    _patch_no_discussion_activity(monkeypatch)
 
     with (
         patch("repo_weaver.sync._ensure_local_clone") as mock_clone,
@@ -264,6 +306,7 @@ def test_sync_non_dry_run_clones_and_weaves_each_changed_repo(
         return [], None
 
     monkeypatch.setattr(gitio, "gh_list_repos", fake_gh_list_repos)
+    _patch_no_discussion_activity(monkeypatch)
 
     def fake_weave_writes_digest(**kwargs: Any) -> int:
         _write_source(
@@ -328,6 +371,7 @@ def test_sync_counts_repo_as_succeeded_when_digest_lands_despite_nonzero_rc(
         return [], None
 
     monkeypatch.setattr(gitio, "gh_list_repos", fake_gh_list_repos)
+    _patch_no_discussion_activity(monkeypatch)
 
     def fake_weave_recovers_but_reports_stale_failure(**kwargs: Any) -> int:
         # Simulates weave()'s own retry mechanism recovering the source even
@@ -395,6 +439,7 @@ def test_sync_counts_repo_as_failed_when_digest_never_lands(
         return [], None
 
     monkeypatch.setattr(gitio, "gh_list_repos", fake_gh_list_repos)
+    _patch_no_discussion_activity(monkeypatch)
 
     with (
         patch("repo_weaver.sync._ensure_local_clone", return_value=True),
@@ -467,6 +512,7 @@ def test_cmd_sync_dry_run_calls_sync_corpus_with_dry_run_true():
         until=None,
         dry_run=True,
         max_modules=0,
+        rules=None,
     )
     assert rc == 0
 
@@ -555,6 +601,7 @@ def test_sync_detects_repo_change_masked_by_old_corpus_wide_watermark_regression
         ], None
 
     monkeypatch.setattr(gitio, "gh_list_repos", fake_gh_list_repos)
+    _patch_no_discussion_activity(monkeypatch)
 
     result = sync.sync_corpus(
         corpus=str(corpus),
@@ -601,6 +648,7 @@ def test_sync_explicit_since_override_applies_globally(
         ], None
 
     monkeypatch.setattr(gitio, "gh_list_repos", fake_gh_list_repos)
+    _patch_no_discussion_activity(monkeypatch)
 
     # Explicit --since predates both pushes -> BOTH repos changed, regardless
     # of their own (later) per-repo digest dates.
@@ -784,3 +832,438 @@ def test_cmd_sync_json_output_reflects_discovery_failure_exit_code(
     captured = capsys.readouterr()
     parsed = json.loads(captured.out)
     assert parsed["discovery_failed"] == ["microsoft"]
+
+
+# ---------------------------------------------------------------------------
+# SYNC11 -- `sync --rules-file` onboards a genuinely new repo
+# ---------------------------------------------------------------------------
+
+
+def test_sync_with_rules_onboards_new_repo_distinct_from_normal_sync(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """A repo discover_repos() matches that is NOT yet tracked gets a one-time
+    onboarding weave (since=None -- full history), and is reported in
+    `result["onboarded"]`, separate from the normal `changed`/`woven` fields
+    used for the pre-existing tracked repo's incremental sync.
+    """
+    corpus = tmp_path / "corpus"
+    _write_source(corpus, "microsoft__amplifier-app-repo-weaver-2026-06-25-changes.md")
+
+    matched = [
+        {
+            "name": "amplifier-app-repo-weaver",
+            "isFork": False,
+            "pushedAt": "2026-06-20T00:00:00Z",
+            "nameWithOwner": "microsoft/amplifier-app-repo-weaver",
+        },
+        {
+            "name": "amplifier-brand-new-repo",
+            "isFork": False,
+            "pushedAt": "2026-07-01T00:00:00Z",
+            "nameWithOwner": "microsoft/amplifier-brand-new-repo",
+        },
+    ]
+
+    def fake_discover_repos(
+        rules: list[dict[str, Any]],
+    ) -> tuple[list[dict[str, Any]], list[str]]:
+        return matched, []
+
+    monkeypatch.setattr(gitio, "discover_repos", fake_discover_repos)
+
+    def fake_gh_list_repos(
+        owner: str, include_forks: bool = True, visibility: str = "all"
+    ) -> tuple[list[dict[str, Any]], None]:
+        return matched, None
+
+    monkeypatch.setattr(gitio, "gh_list_repos", fake_gh_list_repos)
+    _patch_no_discussion_activity(monkeypatch)
+
+    weave_calls: list[dict[str, Any]] = []
+
+    def fake_weave(**kwargs: Any) -> int:
+        weave_calls.append(kwargs)
+        repo_path = Path(str(kwargs["repo"]))
+        _write_source(corpus, f"{repo_path.name}-{kwargs['until']}-changes.md")
+        return 0
+
+    with (
+        patch("repo_weaver.sync._ensure_local_clone", return_value=True),
+        patch("repo_weaver.sync._weave", side_effect=fake_weave),
+    ):
+        result = sync.sync_corpus(
+            corpus=str(corpus),
+            clones_dir=str(tmp_path / "clones"),
+            until="2026-07-07",
+            dry_run=False,
+            rules=[{"owner": "microsoft", "match": "amplifier*"}],
+        )
+
+    # Exactly one weave call this run -- the onboarding weave for the new
+    # repo. The pre-existing repo did not push since its own last-sync
+    # (2026-06-25 -> pushed 2026-06-20), so it is not re-woven.
+    assert len(weave_calls) == 1
+    assert weave_calls[0]["since"] is None, (
+        "Onboarding must use weave()'s own full-history default, not an "
+        "incremental --since slice."
+    )
+    assert weave_calls[0]["until"] == "2026-07-07"
+    assert (
+        Path(str(weave_calls[0]["repo"])).name == "microsoft__amplifier-brand-new-repo"
+    )
+
+    assert result["onboarded"] == [
+        {
+            "owner": "microsoft",
+            "repo": "amplifier-brand-new-repo",
+            "nameWithOwner": "microsoft/amplifier-brand-new-repo",
+            "status": "onboarded",
+        }
+    ]
+    assert result["changed"] == [], (
+        "The pre-existing tracked repo was already up to date -- it must not "
+        "appear in `changed`/`woven`; onboarding is reported separately."
+    )
+    assert result["errors"] == []
+
+
+def test_sync_with_rules_dry_run_reports_would_onboard_without_cloning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """dry_run applies to onboarding too: new repos are reported with status
+    "would_onboard" but nothing is cloned or woven."""
+    corpus = tmp_path / "corpus"
+    _write_source(corpus, "microsoft__amplifier-existing-2026-06-25-changes.md")
+
+    matched = [
+        {
+            "name": "amplifier-existing",
+            "isFork": False,
+            "pushedAt": "2026-06-20T00:00:00Z",
+            "nameWithOwner": "microsoft/amplifier-existing",
+        },
+        {
+            "name": "amplifier-new",
+            "isFork": False,
+            "pushedAt": "2026-07-01T00:00:00Z",
+            "nameWithOwner": "microsoft/amplifier-new",
+        },
+    ]
+    monkeypatch.setattr(gitio, "discover_repos", lambda rules: (matched, []))
+
+    def fake_gh_list_repos(
+        owner: str, include_forks: bool = True, visibility: str = "all"
+    ) -> tuple[list[dict[str, Any]], None]:
+        return matched, None
+
+    monkeypatch.setattr(gitio, "gh_list_repos", fake_gh_list_repos)
+    _patch_no_discussion_activity(monkeypatch)
+
+    with (
+        patch("repo_weaver.sync._ensure_local_clone") as mock_clone,
+        patch("repo_weaver.sync._weave") as mock_weave,
+    ):
+        result = sync.sync_corpus(
+            corpus=str(corpus),
+            clones_dir=str(tmp_path / "clones"),
+            until="2026-07-07",
+            dry_run=True,
+            rules=[{"owner": "microsoft", "match": "amplifier*"}],
+        )
+
+    mock_clone.assert_not_called()
+    mock_weave.assert_not_called()
+    assert result["onboarded"] == [
+        {
+            "owner": "microsoft",
+            "repo": "amplifier-new",
+            "nameWithOwner": "microsoft/amplifier-new",
+            "status": "would_onboard",
+        }
+    ]
+
+
+# ---------------------------------------------------------------------------
+# SYNC12 -- already-tracked discoveries never trigger a redundant onboarding
+# ---------------------------------------------------------------------------
+
+
+def test_sync_with_rules_skips_onboarding_when_already_tracked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    corpus = _make_corpus_with_tracked(tmp_path)
+
+    matched = [
+        {
+            "name": "amplifier-app-repo-weaver",
+            "isFork": False,
+            "pushedAt": "2026-07-01T00:00:00Z",
+            "nameWithOwner": "microsoft/amplifier-app-repo-weaver",
+        },
+    ]
+
+    def fake_discover_repos(
+        rules: list[dict[str, Any]],
+    ) -> tuple[list[dict[str, Any]], list[str]]:
+        return matched, []
+
+    monkeypatch.setattr(gitio, "discover_repos", fake_discover_repos)
+
+    def fake_gh_list_repos(
+        owner: str, include_forks: bool = True, visibility: str = "all"
+    ) -> tuple[list[dict[str, Any]], None]:
+        if owner == "microsoft":
+            return matched, None
+        return [], None
+
+    monkeypatch.setattr(gitio, "gh_list_repos", fake_gh_list_repos)
+    _patch_no_discussion_activity(monkeypatch)
+
+    with (
+        patch("repo_weaver.sync._ensure_local_clone", return_value=True) as mock_clone,
+        patch("repo_weaver.sync._weave", return_value=0) as mock_weave,
+    ):
+
+        def fake_weave_writes_digest(**kwargs: Any) -> int:
+            _write_source(
+                corpus, "microsoft__amplifier-app-repo-weaver-2026-07-07-changes.md"
+            )
+            return 0
+
+        mock_weave.side_effect = fake_weave_writes_digest
+
+        result = sync.sync_corpus(
+            corpus=str(corpus),
+            clones_dir=str(tmp_path / "clones"),
+            until="2026-07-07",
+            dry_run=False,
+            rules=[{"owner": "microsoft", "match": "amplifier*"}],
+        )
+
+    assert result["onboarded"] == []
+    # Exactly ONE clone/weave call -- the normal changed-repo path -- not a
+    # second redundant onboarding attempt for an already-tracked repo.
+    mock_clone.assert_called_once()
+    mock_weave.assert_called_once()
+    changed_names = {e["nameWithOwner"] for e in result["changed"]}
+    assert changed_names == {"microsoft/amplifier-app-repo-weaver"}
+
+
+# ---------------------------------------------------------------------------
+# SYNC13 -- omitting `rules` never calls discover_repos (no regression)
+# ---------------------------------------------------------------------------
+
+
+def test_sync_corpus_without_rules_never_calls_discover_repos(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    corpus = _make_corpus_with_tracked(tmp_path)
+
+    called = {"discover": False}
+
+    def fake_discover_repos(
+        rules: list[dict[str, Any]],
+    ) -> tuple[list[dict[str, Any]], list[str]]:
+        called["discover"] = True
+        return [], []
+
+    monkeypatch.setattr(gitio, "discover_repos", fake_discover_repos)
+
+    def fake_gh_list_repos(
+        owner: str, include_forks: bool = True, visibility: str = "all"
+    ) -> tuple[list[dict[str, Any]], None]:
+        return [], None
+
+    monkeypatch.setattr(gitio, "gh_list_repos", fake_gh_list_repos)
+
+    result = sync.sync_corpus(
+        corpus=str(corpus),
+        clones_dir=str(tmp_path / "clones"),
+        dry_run=True,
+    )
+
+    assert called["discover"] is False, (
+        "discover_repos() must never be called when `rules` is omitted -- "
+        "the additive parameter must not change the pre-existing code path."
+    )
+    assert result["onboarded"] == []
+
+
+# ---------------------------------------------------------------------------
+# SYNC14 -- onboarding failure is recorded loudly but does not abort the run
+# ---------------------------------------------------------------------------
+
+
+def test_sync_with_rules_onboarding_failure_recorded_but_does_not_abort(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    corpus = tmp_path / "corpus"
+    _write_source(corpus, "microsoft__amplifier-existing-2026-06-25-changes.md")
+
+    matched = [
+        {
+            "name": "amplifier-existing",
+            "isFork": False,
+            "pushedAt": "2026-06-20T00:00:00Z",
+            "nameWithOwner": "microsoft/amplifier-existing",
+        },
+        {
+            "name": "amplifier-broken-onboard",
+            "isFork": False,
+            "pushedAt": "2026-07-01T00:00:00Z",
+            "nameWithOwner": "microsoft/amplifier-broken-onboard",
+        },
+        {
+            "name": "amplifier-good-onboard",
+            "isFork": False,
+            "pushedAt": "2026-07-01T00:00:00Z",
+            "nameWithOwner": "microsoft/amplifier-good-onboard",
+        },
+    ]
+
+    def fake_discover_repos(
+        rules: list[dict[str, Any]],
+    ) -> tuple[list[dict[str, Any]], list[str]]:
+        return matched, []
+
+    monkeypatch.setattr(gitio, "discover_repos", fake_discover_repos)
+
+    def fake_gh_list_repos(
+        owner: str, include_forks: bool = True, visibility: str = "all"
+    ) -> tuple[list[dict[str, Any]], None]:
+        return matched, None
+
+    monkeypatch.setattr(gitio, "gh_list_repos", fake_gh_list_repos)
+    _patch_no_discussion_activity(monkeypatch)
+
+    def fake_weave(**kwargs: Any) -> int:
+        repo_path = Path(str(kwargs["repo"]))
+        if "broken" in repo_path.name:
+            # Simulate a real weave failure: non-zero return, no digest written.
+            return 1
+        _write_source(corpus, f"{repo_path.name}-{kwargs['until']}-changes.md")
+        return 0
+
+    with (
+        patch("repo_weaver.sync._ensure_local_clone", return_value=True),
+        patch("repo_weaver.sync._weave", side_effect=fake_weave),
+    ):
+        result = sync.sync_corpus(
+            corpus=str(corpus),
+            clones_dir=str(tmp_path / "clones"),
+            until="2026-07-07",
+            dry_run=False,
+            rules=[{"owner": "microsoft", "match": "amplifier*"}],
+        )
+
+    onboarded_by_repo = {o["repo"]: o["status"] for o in result["onboarded"]}
+    assert onboarded_by_repo == {
+        "amplifier-broken-onboard": "failed",
+        "amplifier-good-onboard": "onboarded",
+    }
+    assert any("amplifier-broken-onboard" in e for e in result["errors"]), (
+        "A failed onboarding must be recorded loudly in `errors`, never "
+        "silently swallowed."
+    )
+
+
+# ---------------------------------------------------------------------------
+# SYNC15 -- CLI wiring for `sync --rules-file`
+# ---------------------------------------------------------------------------
+
+
+def test_cmd_sync_reads_rules_file_and_forwards_to_sync_corpus(tmp_path: Path):
+    rules_file = tmp_path / "rules.json"
+    rules_file.write_text(
+        json.dumps([{"owner": "microsoft", "match": "amplifier*"}]),
+        encoding="utf-8",
+    )
+    args = argparse.Namespace(
+        corpus="/fake/corpus",
+        clones_dir="~/fake-clones",
+        since=None,
+        until=None,
+        dry_run=True,
+        max_modules=0,
+        rules_file=str(rules_file),
+    )
+    fake_result = {
+        "last_sync": "2026-06-25",
+        "until": "2026-07-05",
+        "owners": {},
+        "changed": [],
+        "errors": [],
+        "discovery_failed": [],
+        "onboarded": [],
+    }
+
+    with patch("repo_weaver.cli.sync_corpus", return_value=fake_result) as mock_sync:
+        rc = cli.cmd_sync(args)
+
+    assert rc == 0
+    _, kwargs = mock_sync.call_args
+    assert kwargs["rules"] == [{"owner": "microsoft", "match": "amplifier*"}]
+
+
+def test_cmd_sync_reports_error_for_missing_rules_file(tmp_path: Path):
+    args = argparse.Namespace(
+        corpus="/fake/corpus",
+        clones_dir="~/fake-clones",
+        since=None,
+        until=None,
+        dry_run=True,
+        max_modules=0,
+        rules_file=str(tmp_path / "does-not-exist.json"),
+    )
+    rc = cli.cmd_sync(args)
+    assert rc == 1
+
+
+def test_cmd_sync_reports_error_for_invalid_rules_json(tmp_path: Path):
+    rules_file = tmp_path / "rules.json"
+    rules_file.write_text("not valid json {{{", encoding="utf-8")
+    args = argparse.Namespace(
+        corpus="/fake/corpus",
+        clones_dir="~/fake-clones",
+        since=None,
+        until=None,
+        dry_run=True,
+        max_modules=0,
+        rules_file=str(rules_file),
+    )
+    rc = cli.cmd_sync(args)
+    assert rc == 1
+
+
+def test_cmd_sync_exits_nonzero_when_onboarding_failed():
+    """A recorded onboarding failure forces a non-zero exit even when the
+    normal changed/failed fields are otherwise empty -- fail-loud, not
+    silently swallowed."""
+    fake_result = {
+        "last_sync": "2026-06-25",
+        "until": "2026-07-07",
+        "owners": {"microsoft": 0},
+        "changed": [],
+        "errors": ["microsoft/amplifier-broken: onboarding weave failed ..."],
+        "discovery_failed": [],
+        "onboarded": [
+            {
+                "owner": "microsoft",
+                "repo": "amplifier-broken",
+                "nameWithOwner": "microsoft/amplifier-broken",
+                "status": "failed",
+            }
+        ],
+    }
+    args = argparse.Namespace(
+        corpus="/fake/corpus",
+        clones_dir="~/fake-clones",
+        since=None,
+        until=None,
+        dry_run=False,
+        max_modules=0,
+    )
+    with patch("repo_weaver.cli.sync_corpus", return_value=fake_result):
+        rc = cli.cmd_sync(args)
+    assert rc == 1
