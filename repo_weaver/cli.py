@@ -200,27 +200,27 @@ def cmd_doctor(args: argparse.Namespace) -> int:  # noqa: ARG001
         else "(not cached)"
     )
     print(f"  {bundled_label:<44s} {bundled_short}")
-    if drift.cli_commit:
-        cli_short = drift.cli_commit[:8]
-        print(f"  {cli_label:<44s} {cli_short}")
+    if drift.cli_version:
+        print(f"  {cli_label:<44s} {drift.cli_version}")
     else:
         print(f"  {cli_label:<44s} (unknown: {drift.error})")
 
     if drift.drifted is True:
-        assert drift.cli_commit is not None  # narrows for mypy/pyright
+        assert drift.cli_version is not None  # narrows for mypy/pyright
         print(
             f"\n  ! DRIFT: repo-weaver's bundled wiki-weaver ({bundled_short}) differs "
-            f"from the wiki-weaver CLI on PATH ({drift.cli_commit[:8]}) \u2014 run "
+            f"from the wiki-weaver CLI on PATH ({drift.cli_version}) \u2014 run "
             "`repo-weaver update` to bring them back in sync."
         )
     elif drift.drifted is False:
         print(
-            f"  \u2713 wiki-weaver in sync (bundled and CLI on PATH both at {bundled_short})"
+            f"  \u2713 wiki-weaver in sync (bundled {bundled_short}, "
+            f"CLI on PATH {drift.cli_version})"
         )
     else:
         print(
             "  ! could not determine wiki-weaver sync status: "
-            f"{drift.error or 'commit unavailable'}"
+            f"{drift.error or 'version unavailable'}"
         )
     print()
 
