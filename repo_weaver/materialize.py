@@ -49,6 +49,11 @@ _README_CANDIDATES = [
 # Maximum body chars shown per PR before truncating.
 _PR_BODY_MAX = 600
 
+# Maximum body chars shown per comment/review before truncating -- comments
+# are typically shorter and more numerous than PR/issue bodies, so a tighter
+# cap keeps a busy discussion thread from dominating the digest.
+_COMMENT_BODY_MAX = 300
+
 # ---------------------------------------------------------------------------
 # Notable Commits gating thresholds
 #
@@ -332,20 +337,84 @@ def _format_cross_repo_section(refs: list[tuple[str, str, object]]) -> str:
     return "".join(lines)
 
 
+def _author_login(author_field: object) -> str:
+    """Return the login/name string from a gh CLI ``author`` field.
+
+    Handles the dict shape (``{"login": "..."}``) returned by ``gh`` for
+    PRs, issues, comments, and reviews alike, falling back to a bare string
+    or ``"unknown"`` when absent -- matches the extraction pattern
+    previously duplicated across this module.
+    """
+    author_info = author_field or {}
+    if isinstance(author_info, dict):
+        return str(author_info.get("login") or "unknown")
+    return str(author_info)
+
+
+def _append_comment_line(parts: list[str], comment: dict[str, object]) -> None:
+    """Append one PR/issue comment as a single formatted bullet line."""
+    author = _author_login(comment.get("author"))
+    created = str(comment.get("createdAt") or "")[:10]
+    raw_body = str(comment.get("body") or "").strip()
+    body_excerpt = (
+        textwrap.shorten(raw_body, width=_COMMENT_BODY_MAX, placeholder="\u2026")
+        if raw_body
+        else "(empty)"
+    )
+    date_part = f" ({created})" if created else ""
+    parts.append(f"- **{author}**{date_part}: {body_excerpt}\n")
+
+
+def _append_review_line(parts: list[str], review: dict[str, object]) -> None:
+    """Append one PR review as a single formatted bullet line.
+
+    Reviews carry a ``state`` (e.g. ``APPROVED``, ``CHANGES_REQUESTED``,
+    ``COMMENTED``) which is always shown, even when the review has no body
+    text -- the verdict itself is signal.
+    """
+    author = _author_login(review.get("author"))
+    state = str(review.get("state") or "COMMENTED")
+    submitted = str(review.get("submittedAt") or "")[:10]
+    raw_body = str(review.get("body") or "").strip()
+    body_excerpt = (
+        textwrap.shorten(raw_body, width=_COMMENT_BODY_MAX, placeholder="\u2026")
+        if raw_body
+        else ""
+    )
+    date_part = f" ({submitted})" if submitted else ""
+    line = f"- **{author}**{date_part} \u2014 {state}"
+    if body_excerpt:
+        line += f": {body_excerpt}"
+    parts.append(line + "\n")
+
+
 def _append_pr_detail(
     parts: list[str],
     pr: dict[str, object],
     pr_url: Optional[str] = None,
+    discussion: Optional[dict[str, list[dict[str, object]]]] = None,
+    discussion_error: Optional[str] = None,
 ) -> None:
     """Append the full detail block for one substantive PR to *parts*.
 
     Args:
-        parts:  Accumulator list of markdown fragments.
-        pr:     PR dict from ``gh pr list --json``.
-        pr_url: Full GitHub URL for this PR
-                (e.g. ``https://github.com/owner/repo/pull/42``).
-                When provided, emitted as a ``**URL:**`` field so the
-                synthesizer can use it in the ``log`` page entry.
+        parts:            Accumulator list of markdown fragments.
+        pr:                PR dict from ``gh pr list --json``.
+        pr_url:            Full GitHub URL for this PR
+                           (e.g. ``https://github.com/owner/repo/pull/42``).
+                           When provided, emitted as a ``**URL:**`` field so
+                           the synthesizer can use it in the ``log`` page entry.
+        discussion:        Optional ``{"comments": [...], "reviews": [...]}``
+                           from :func:`repo_weaver.gitio.gh_pr_discussion`.
+                           When ``None`` (no remote, or discussion not
+                           fetched for this PR), no discussion/review
+                           subsections are emitted. Empty lists are valid
+                           (a PR with no comments/reviews) and simply
+                           produce no subsection for that kind.
+        discussion_error:  When set, a gh error occurred while fetching
+                           discussion data for this PR -- shown explicitly
+                           so a fetch failure is never mistaken for "no
+                           discussion".
     """
     n = pr.get("number", "?")
     title = pr.get("title") or "(no title)"
@@ -356,11 +425,7 @@ def _append_pr_detail(
         if raw_body.strip()
         else ""
     )
-    author_info = pr.get("author") or {}
-    if isinstance(author_info, dict):
-        author_name = author_info.get("login") or "unknown"
-    else:
-        author_name = str(author_info)
+    author_name = _author_login(pr.get("author"))
     merged_at = str(pr.get("mergedAt") or "")[:10]
     files_list = pr.get("files") or []
     assert isinstance(files_list, list)
@@ -378,6 +443,87 @@ def _append_pr_detail(
     if body_excerpt:
         parts.append(f"\n{body_excerpt}\n")
     parts.append("\n")
+
+    if discussion_error:
+        parts.append(
+            f"_({discussion_error} \u2014 discussion data could not be "
+            "fetched for this PR.)_\n\n"
+        )
+    elif discussion is not None:
+        comments = discussion.get("comments") or []
+        reviews = discussion.get("reviews") or []
+        if comments:
+            parts.append("**Discussion:**\n\n")
+            for c in comments:
+                _append_comment_line(parts, c)
+            parts.append("\n")
+        if reviews:
+            parts.append("**Reviews:**\n\n")
+            for rv in reviews:
+                _append_review_line(parts, rv)
+            parts.append("\n")
+
+
+def _append_issue_detail(
+    parts: list[str],
+    issue: dict[str, object],
+    issue_url: Optional[str] = None,
+    comments: Optional[list[dict[str, object]]] = None,
+    comments_error: Optional[str] = None,
+) -> None:
+    """Append the full detail block for one issue to *parts*.
+
+    Mirrors :func:`_append_pr_detail`'s shape (author, dates, URL, body
+    excerpt) plus its own ``**Discussion:**`` subsection for comments.
+
+    Args:
+        parts:          Accumulator list of markdown fragments.
+        issue:          Issue dict from ``gh issue list --json``.
+        issue_url:      Full GitHub URL for this issue
+                        (e.g. ``https://github.com/owner/repo/issues/42``).
+        comments:       Optional list of comment dicts from
+                        :func:`repo_weaver.gitio.gh_issue_discussion`.
+                        ``None`` means discussion was not fetched (no
+                        remote); an empty list means genuinely no comments.
+        comments_error: When set, a gh error occurred while fetching this
+                        issue's comments -- shown explicitly rather than
+                        silently treated as "no comments".
+    """
+    n = issue.get("number", "?")
+    title = issue.get("title") or "(no title)"
+    raw_body = issue.get("body") or ""
+    assert isinstance(raw_body, str)
+    body_excerpt = (
+        textwrap.shorten(raw_body.strip(), width=_PR_BODY_MAX, placeholder="\u2026")
+        if raw_body.strip()
+        else ""
+    )
+    author_name = _author_login(issue.get("author"))
+    created_at = str(issue.get("createdAt") or "")[:10]
+    updated_at = str(issue.get("updatedAt") or "")[:10]
+
+    parts.append(f"### Issue #{n}: {title}\n\n")
+    parts.append(f"- **Author:** {author_name}\n")
+    if created_at:
+        parts.append(f"- **Created:** {created_at}\n")
+    if updated_at:
+        parts.append(f"- **Updated:** {updated_at}\n")
+    if issue_url:
+        parts.append(f"- **URL:** {issue_url}\n")
+    if body_excerpt:
+        parts.append(f"\n{body_excerpt}\n")
+    parts.append("\n")
+
+    if comments_error:
+        parts.append(
+            f"_({comments_error} \u2014 discussion data could not be "
+            "fetched for this issue.)_\n\n"
+        )
+    elif comments:
+        parts.append("**Discussion:**\n\n")
+        for c in comments:
+            _append_comment_line(parts, c)
+        parts.append("\n")
 
 
 # ---------------------------------------------------------------------------
@@ -680,6 +826,22 @@ def _build_change_digest(
         o, n_ = owner_repo
         return f"https://github.com/{o}/{n_}/pull/{pr_number}"
 
+    # Helper: fetch a single PR's comments+reviews, bounded to PRs that are
+    # actually displayed (substantive ones -- routine PRs are collapsed into
+    # a one-line summary and never shown in detail, so fetching their
+    # discussion would be wasted `gh` calls).
+    def _fetch_pr_discussion(
+        pr_number: object,
+    ) -> tuple[Optional[dict[str, list[dict[str, object]]]], Optional[str]]:
+        if owner_repo is None:
+            return None, None
+        o, n_ = owner_repo
+        try:
+            num = int(pr_number)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return None, None
+        return gitio.gh_pr_discussion(f"{o}/{n_}", num)
+
     # Track substantive PR count for Notable Commits gating (updated per branch below).
     substantive_pr_count = 0
 
@@ -696,7 +858,14 @@ def _build_change_digest(
             # This is the pre-classification behaviour used for A/B comparison.
             parts.append("## Merged Pull Requests\n\n")
             for pr in prs:
-                _append_pr_detail(parts, pr, pr_url=_pr_url(pr.get("number")))
+                pr_discussion, pr_disc_err = _fetch_pr_discussion(pr.get("number"))
+                _append_pr_detail(
+                    parts,
+                    pr,
+                    pr_url=_pr_url(pr.get("number")),
+                    discussion=pr_discussion,
+                    discussion_error=pr_disc_err,
+                )
             # All PRs shown with full detail — treat entire pool as substantive.
             substantive_pr_count = len(prs)
         else:
@@ -726,7 +895,16 @@ def _build_change_digest(
                 for scope_key, scope_prs in scoped.items():
                     parts.append(f"### Area: `{scope_key}`\n\n")
                     for pr in scope_prs:
-                        _append_pr_detail(parts, pr, pr_url=_pr_url(pr.get("number")))
+                        pr_discussion, pr_disc_err = _fetch_pr_discussion(
+                            pr.get("number")
+                        )
+                        _append_pr_detail(
+                            parts,
+                            pr,
+                            pr_url=_pr_url(pr.get("number")),
+                            discussion=pr_discussion,
+                            discussion_error=pr_disc_err,
+                        )
             else:
                 parts.append("_(No substantive PRs found in this window.)_\n\n")
 
@@ -752,6 +930,57 @@ def _build_change_digest(
         cross_refs = _extract_cross_repo_refs(prs, self_name)
         if cross_refs:
             parts.append(_format_cross_repo_section(cross_refs))
+
+    # ---- Issues (window-scoped: updatedAt in (since, until]) ----
+    # A trigger-worthy activity (a new comment, a label change) bumps an
+    # issue's updatedAt even with zero new commits -- this section captures
+    # GitHub Issues as first-class corpus content, mirroring the PR section's
+    # shape (full detail + Discussion subsection) rather than a separate,
+    # differently-structured "extra" section.
+    issues: list[dict[str, object]] = []
+    issues_error: Optional[str] = None
+    if owner_repo:
+        _issues_owner, _issues_name = owner_repo
+        issues, issues_error = gitio.gh_issues(
+            f"{_issues_owner}/{_issues_name}", since, until
+        )
+
+    def _issue_url(issue_number: object) -> Optional[str]:
+        if owner_repo is None:
+            return None
+        o, n_ = owner_repo
+        return f"https://github.com/{o}/{n_}/issues/{issue_number}"
+
+    def _fetch_issue_comments(
+        issue_number: object,
+    ) -> tuple[Optional[list[dict[str, object]]], Optional[str]]:
+        if owner_repo is None:
+            return None, None
+        o, n_ = owner_repo
+        try:
+            num = int(issue_number)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return None, None
+        return gitio.gh_issue_discussion(f"{o}/{n_}", num)
+
+    parts.append(f"## Issues ({since} \u2192 {until})\n\n")
+    if issues_error:
+        parts.append(
+            f"_({issues_error} \u2014 issue data could not be fetched for "
+            "this window.)_\n\n"
+        )
+    elif issues:
+        for issue in issues:
+            comments, comments_error = _fetch_issue_comments(issue.get("number"))
+            _append_issue_detail(
+                parts,
+                issue,
+                issue_url=_issue_url(issue.get("number")),
+                comments=comments,
+                comments_error=comments_error,
+            )
+    else:
+        parts.append("_(No issues found in this window.)_\n\n")
 
     # ---- Notable Commits ----
     # Surface per-commit substance so commit-only repos (no or few merged PRs)
