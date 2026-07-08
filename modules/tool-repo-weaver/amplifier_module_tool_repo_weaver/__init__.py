@@ -528,7 +528,7 @@ _TOOLS = [
 async def mount(
     coordinator: Any, config: dict[str, Any] | None = None
 ) -> dict[str, Any]:
-    """Mount all 3 repo-weaver tools into the coordinator.
+    """Mount all 5 repo-weaver tools into the coordinator.
 
     Satisfies the Iron Law: calls coordinator.mount() for each tool so that
     protocol_compliance validation passes.
