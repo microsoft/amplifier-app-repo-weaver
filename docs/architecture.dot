@@ -22,10 +22,11 @@ digraph repo_weaver_architecture {
     style=filled; fillcolor="#eaf2fc"; color="#4a78b5"; penwidth=2;
     fontsize=13; fontname="Helvetica-Bold";
 
-    cli [label="cli.py\nthin CLI:\ninit / weave / ask /\nreplay / doctor / sync /\ndiscover / build-dashboard", shape=box];
+    cli [label="cli.py\nthin CLI:\ninit / weave / ask /\nreplay / doctor / sync /\ndiscover / build-dashboard / update", shape=box];
     weave [label="lib/weave.py\nweave · weave_multi · replay_windows\n(windowed, incremental/staggered, retry,\nstrand-rescue, dedup, fetch-or-warn)\n+ sync.py: per-repo watermark replay", shape=box];
     materialize [label="lib/materialize.py\ngit history → source docs\n(change digests, Notable Commits,\nmodule snapshots, owner__repo files)", shape=box];
     gitio [label="lib/gitio.py\ngit + gh plumbing\n(fetch / fast-forward staleness,\ngh retry/backoff, discover_repos())", shape=box];
+    updater [label="lib/updater.py\nuv reinstall ladder (3 rungs)\n+ PEP 610 direct_url.json verify\n+ wiki-weaver drift check (doctor)", shape=box];
     schema [label="policy/schema.md\nAUTHORED concept-primary\nsynthesis schema\n(attribution + repo-identity rules)", shape=note, fillcolor="#fff2cc", color="#d6b656"];
     eval [label="eval/  (NO LLM)\ngrade.py · trace_grounding.py\ncoverage_check.py", shape=box, fillcolor="#d5e8d4", color="#82b366"];
   }
@@ -57,6 +58,7 @@ digraph repo_weaver_architecture {
   materialize -> inbox [label="writes source docs"];
   cli -> weave [label="weave"];
   cli -> materialize [label="weave", style=dotted];
+  cli -> updater [label="update \u00b7\ndoctor (drift)"];
   schema -> ww_cli [label="schema (policy)\nfeeds engine", style=dashed, color="#d6b656", fontcolor="#b8860b", constraint=false];
   inbox -> ww_cli [label="reads _inbox", style=dashed, color="#d79b00", fontcolor="#b06a00"];
   corpus -> eval [label="deterministic grading\n(reads corpus, no LLM)", style=dotted, color="#82b366", fontcolor="#5a8a3a", constraint=false];
@@ -70,6 +72,7 @@ digraph repo_weaver_architecture {
   // ================= SUBPROCESS BOUNDARY edges (bold red) =================
   weave -> ww_cli [label="  subprocess:\n  wiki-weaver ingest  ", style=bold, penwidth=2.6, color="#b85450", fontcolor="#a02020", lhead=cluster_wikiweaver];
   cli -> ww_cli [label="  subprocess:\n  wiki-weaver ask  ", style=bold, penwidth=2.6, color="#b85450", fontcolor="#a02020", lhead=cluster_wikiweaver];
+  updater -> ww_cli [label="  subprocess:\n  wiki-weaver update  ", style=bold, penwidth=2.6, color="#b85450", fontcolor="#a02020", lhead=cluster_wikiweaver];
   cli -> ww_cli [label="  subprocess:\n  wiki-weaver build-dashboard\n  --group-by repos\n  --group-link-template\n  https://github.com/{group}  ", style=bold, penwidth=2.6, color="#b85450", fontcolor="#a02020", lhead=cluster_wikiweaver];
   ww_cli -> dashboard [label="HTML output\n(repo-branded)", style=bold, penwidth=2.0, color="#4a8a4a", fontcolor="#2a5a2a"];
   ww_cli -> user [label="cited answer", style=bold, penwidth=2.0, color="#b85450", fontcolor="#a02020"];

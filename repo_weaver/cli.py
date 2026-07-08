@@ -12,6 +12,7 @@ Usage:
     repo-weaver sync --corpus DIR [options] [--json]
     repo-weaver discover --rules-file PATH [--json]
     repo-weaver build-dashboard <corpus> --out PATH [--theme PATH]
+    repo-weaver update [--check]
 """
 
 from __future__ import annotations
@@ -29,7 +30,7 @@ from typing import Optional
 
 from wiki_weaver.lib import wiki_dashboard
 
-from . import gitio
+from . import gitio, updater
 from .sync import sync_corpus
 from .weave import _DEFAULT_MAX_CYCLES, _DEFAULT_MAX_RETRIES, _POLICY_SCHEMA
 
@@ -171,6 +172,54 @@ def cmd_doctor(args: argparse.Namespace) -> int:  # noqa: ARG001
                 all_ok = False
         elif not ok:
             all_ok = False
+    print()
+
+    # ---- Resolved @main commits (local only -- run `repo-weaver update
+    # --check` to compare remote) ----
+    print(
+        "Resolved @main commits (local \u2014 run `repo-weaver update --check` "
+        "to compare remote):"
+    )
+    for rec in updater.installed_commit_records():
+        print(f"  {rec.label:<44s} {rec.local_short}")
+
+    # ---- Drift check: repo-weaver's bundled wiki-weaver vs the CLI on PATH ----
+    # These are TWO different copies of wiki-weaver -- the @main-pinned wheel
+    # dependency baked into repo-weaver's own venv, and the separately
+    # installed `wiki-weaver` CLI repo-weaver shells out to. They can drift
+    # from each other even when each is individually current relative to its
+    # own @main -- a distinct failure mode ordinary staleness checks miss.
+    drift = updater.check_wiki_weaver_drift()
+    bundled_label = "wiki-weaver (bundled dependency)"
+    cli_label = "wiki-weaver (CLI on PATH)"
+    bundled_short = (
+        (drift.bundled_commit or "")[:8] or "(not cached)"
+        if drift.bundled_commit is not None
+        else "(not cached)"
+    )
+    print(f"  {bundled_label:<44s} {bundled_short}")
+    if drift.cli_commit:
+        cli_short = drift.cli_commit[:8]
+        print(f"  {cli_label:<44s} {cli_short}")
+    else:
+        print(f"  {cli_label:<44s} (unknown: {drift.error})")
+
+    if drift.drifted is True:
+        assert drift.cli_commit is not None  # narrows for mypy/pyright
+        print(
+            f"\n  ! DRIFT: repo-weaver's bundled wiki-weaver ({bundled_short}) differs "
+            f"from the wiki-weaver CLI on PATH ({drift.cli_commit[:8]}) \u2014 run "
+            "`repo-weaver update` to bring them back in sync."
+        )
+    elif drift.drifted is False:
+        print(
+            f"  \u2713 wiki-weaver in sync (bundled and CLI on PATH both at {bundled_short})"
+        )
+    else:
+        print(
+            "  ! could not determine wiki-weaver sync status: "
+            f"{drift.error or 'commit unavailable'}"
+        )
     print()
 
     if all_ok:
@@ -579,6 +628,21 @@ def cmd_build_dashboard(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Subcommand: update
+# ---------------------------------------------------------------------------
+
+
+def cmd_update(args: argparse.Namespace) -> int:
+    """Refresh repo-weaver's own install, then delegate to `wiki-weaver update`.
+
+    Thin CLI wrapper over :func:`repo_weaver.updater.update` -- see that
+    function's docstring for the full two-stage refresh (repo-weaver itself
+    via the uv reinstall ladder, then wiki-weaver via subprocess delegation).
+    """
+    return updater.update(check_only=args.check)
+
+
+# ---------------------------------------------------------------------------
 # Argument parser
 # ---------------------------------------------------------------------------
 
@@ -900,6 +964,27 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     p.set_defaults(func=cmd_build_dashboard)
+
+    # ---- update ----
+    p = sub.add_parser(
+        "update",
+        help=(
+            "Refresh repo-weaver to latest @main, then delegate to "
+            "`wiki-weaver update` to keep it current too."
+        ),
+    )
+    p.add_argument(
+        "--check",
+        "--dry-run",
+        action="store_true",
+        dest="check",
+        default=False,
+        help=(
+            "Report drift (repo-weaver + wiki-weaver) without making any "
+            "changes. Aliases: --check, --dry-run."
+        ),
+    )
+    p.set_defaults(func=cmd_update)
 
     return parser
 
