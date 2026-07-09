@@ -626,6 +626,54 @@ def gh_issue_discussion(
     return (comments if isinstance(comments, list) else []), None
 
 
+def gh_repo_pushed_at(owner_repo: str) -> tuple[Optional[str], Optional[str]]:
+    """Return the ISO 8601 ``pushedAt`` timestamp for a single repo.
+
+    The single-repo equivalent of the ``pushedAt`` field :func:`gh_list_repos`
+    only returns in bulk per-owner (via ``gh repo list``). Exists so a caller
+    that only cares about ONE repo -- e.g. :func:`repo_weaver.sync.changed_since`,
+    a pure per-repo query -- doesn't need to fetch and filter an owner's
+    entire repo list just to get one push date.
+
+    *owner_repo* is the ``owner/repo`` string.
+
+    Returns a ``(pushed_at, error)`` tuple:
+
+    * ``(pushed_at, None)`` -- gh ran successfully; *pushed_at* is the raw
+      ISO 8601 timestamp string (e.g. ``"2026-07-08T14:03:34Z"``).
+    * ``(None, error)``     -- gh exited non-zero (after retries), returned
+      an empty/unparsable response, or the response was missing the
+      ``pushedAt`` field; *error* carries a human-readable reason. Unlike
+      list-style calls, an empty response here is NOT a legitimate "zero
+      results" case (a single named repo either exists and has a push date,
+      or the call failed) -- callers **must** surface this loudly rather
+      than silently treating it as "never pushed".
+    """
+    cmd = ["gh", "repo", "view", owner_repo, "--json", "pushedAt"]
+    r = _run_gh_with_retry(cmd)
+    if r.returncode != 0:
+        raw_err = (r.stderr or r.stdout or "").strip()
+        first_line = (
+            raw_err.splitlines()[0][:200]
+            if raw_err
+            else "gh exited non-zero with no message"
+        )
+        return None, f"gh error: {first_line}"
+
+    if not r.stdout.strip():
+        return None, "gh error: empty response for pushedAt"
+
+    try:
+        data: dict[str, object] = json.loads(r.stdout)
+    except json.JSONDecodeError as exc:
+        return None, f"gh error: could not parse JSON response ({exc})"
+
+    pushed_at = data.get("pushedAt")
+    if not isinstance(pushed_at, str) or not pushed_at:
+        return None, "gh error: response missing 'pushedAt' field"
+    return pushed_at, None
+
+
 def gh_list_repos(
     owner: str,
     include_forks: bool = True,
