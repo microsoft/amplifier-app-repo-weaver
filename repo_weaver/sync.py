@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import re
 import sys
+from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
 from typing import Any, Optional
@@ -254,6 +255,136 @@ def _onboard_new_repos(
             )
 
     return onboarded, errors
+
+
+# ---------------------------------------------------------------------------
+# Change detection: changed_since() public API
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class ChangeSignal:
+    """Result of a :func:`changed_since` change-detection query for one repo.
+
+    A pure value object -- carries both the boolean verdict and the raw
+    per-signal data so callers who want detail (not just yes/no) can inspect
+    exactly what fired, without repo-weaver imposing its own interpretation.
+    """
+
+    changed: bool
+    """True if push, PR, or issue activity was detected after ``since``."""
+
+    reasons: list[str] = field(default_factory=list)
+    """Human-readable reasons, e.g. ``["push activity", "issue activity"]``.
+    Empty when ``changed`` is False."""
+
+    pushed_at: Optional[str] = None
+    """Raw ISO 8601 ``pushedAt`` timestamp, or None if unavailable/errored."""
+
+    pr_updated_at: Optional[str] = None
+    """``YYYY-MM-DD`` of the most-recently-updated PR, or None."""
+
+    issue_updated_at: Optional[str] = None
+    """``YYYY-MM-DD`` of the most-recently-updated issue, or None."""
+
+    errors: list[str] = field(default_factory=list)
+    """Non-fatal ``gh`` call failures encountered while gathering signals.
+    A failed signal does not prevent a decision from the signals that DID
+    succeed -- matches this module's existing "record loudly, don't abort"
+    convention (see :func:`sync_corpus`)."""
+
+
+def _resolve_change_decision(
+    since: str,
+    pushed_date: Optional[str],
+    pr_updated: Optional[str],
+    issue_updated: Optional[str],
+) -> tuple[bool, list[str]]:
+    """Pure union-decision: given push/PR/issue signal dates and a ``since``
+    watermark (``YYYY-MM-DD``, exclusive), decide whether ANY signal crossed
+    it, and which.
+
+    This is the single source of truth for the push-OR-PR-OR-issue union
+    check -- both :func:`changed_since` (fresh 3-``gh``-call fetch) and
+    :func:`sync_corpus` (reusing its already-fetched bulk ``pushedAt``, plus
+    its own 2 ``gh`` calls for PR/issue) call this same helper, so the
+    decision logic itself is never duplicated between the two.
+
+    All three date args are ``YYYY-MM-DD`` strings (already truncated from
+    any ISO 8601 timestamp), empty string, or None -- any falsy value is
+    treated as "no signal". Returns ``(changed, reasons)`` where *reasons*
+    is empty when *changed* is False.
+    """
+    reasons: list[str] = []
+    if pushed_date and pushed_date > since:
+        reasons.append("push activity")
+    if pr_updated and pr_updated > since:
+        reasons.append("PR activity")
+    if issue_updated and issue_updated > since:
+        reasons.append("issue activity")
+    return bool(reasons), reasons
+
+
+def changed_since(owner_repo: str, since: str) -> ChangeSignal:
+    """Has *owner_repo* had push, PR, or issue activity since *since*?
+
+    A PURE query: reads no repo-weaver-owned state (no corpus, no watermark
+    file) -- the caller supplies and owns *since* entirely. This is the
+    stable, standalone extraction of the exact union-check :func:`sync_corpus`
+    already performs internally against its own corpus-relative watermark;
+    here the watermark is just a plain argument, so any caller with their own
+    "last processed" notion (e.g. an external scheduler) can reuse the same
+    detection logic without adopting repo-weaver's corpus layout.
+
+    Makes 3 ``gh`` calls: one :func:`repo_weaver.gitio.gh_repo_pushed_at`
+    (push signal) and two :func:`repo_weaver.gitio.gh_most_recent_update`
+    calls (PR + issue discussion-activity signals -- comments, reviews, and
+    label changes all bump an item's own ``updatedAt`` even with no new
+    commit). A failure on any one call is recorded in the returned
+    ``errors`` list but does NOT prevent a decision based on whichever
+    signals DID succeed -- never raises.
+
+    Args:
+        owner_repo: ``"owner/repo"`` string.
+        since:      ``YYYY-MM-DD`` watermark, exclusive -- activity must be
+                    strictly AFTER this date to count as changed.
+
+    Returns:
+        A :class:`ChangeSignal` with the verdict, reasons, raw per-signal
+        dates, and any non-fatal errors encountered.
+
+    Example:
+        >>> signal = changed_since("owner/repo", since="2026-06-01")
+        >>> if signal.changed:
+        ...     print(signal.reasons)  # e.g. ["push activity"]
+    """
+    errors: list[str] = []
+
+    pushed_at, push_err = gitio.gh_repo_pushed_at(owner_repo)
+    if push_err is not None:
+        errors.append(f"{owner_repo}: {push_err}")
+    pushed_date = pushed_at[:10] if pushed_at else None
+
+    pr_updated, pr_err = gitio.gh_most_recent_update(owner_repo, "pr")
+    if pr_err is not None:
+        errors.append(f"{owner_repo}: {pr_err}")
+
+    issue_updated, issue_err = gitio.gh_most_recent_update(owner_repo, "issue")
+    if issue_err is not None:
+        errors.append(f"{owner_repo}: {issue_err}")
+
+    changed, reasons = _resolve_change_decision(
+        since, pushed_date, pr_updated, issue_updated
+    )
+
+    return ChangeSignal(
+        changed=changed,
+        reasons=reasons,
+        pushed_at=pushed_at,
+        pr_updated_at=pr_updated,
+        issue_updated_at=issue_updated,
+        errors=errors,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -543,8 +674,6 @@ def sync_corpus(
                 else f"{owner}/{name}"
             )
 
-            push_changed = bool(pushed_date and pushed_date > effective_since)
-
             # Cheap gating check: PR/issue discussion activity (comments,
             # reviews, label changes) bumps that item's own `updatedAt` even
             # when NO new commit was pushed. 2 lightweight `gh` calls per
@@ -561,12 +690,17 @@ def sync_corpus(
             if issue_err is not None:
                 errors.append(f"{name_with_owner}: {issue_err}")
 
-            discussion_changed = bool(
-                (pr_updated and pr_updated > effective_since)
-                or (issue_updated and issue_updated > effective_since)
+            # Union decision (push OR PR OR issue) shared with the standalone
+            # changed_since() public API -- see _resolve_change_decision. This
+            # loop reuses its own already-fetched bulk `pushed_date` (from the
+            # per-owner gh_list_repos() call above) rather than re-fetching it
+            # via gh_repo_pushed_at(), avoiding a redundant single-repo `gh`
+            # call per tracked repo; only the decision logic itself is shared.
+            is_changed, _reasons = _resolve_change_decision(
+                effective_since, pushed_date, pr_updated, issue_updated
             )
 
-            if push_changed or discussion_changed:
+            if is_changed:
                 changed.append(
                     {
                         "owner": owner,
