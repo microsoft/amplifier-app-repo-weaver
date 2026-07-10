@@ -370,6 +370,27 @@ def gh_merged_prs(
     return result, None
 
 
+def _is_issues_disabled_error(raw_err: str) -> bool:
+    """Detect gh's "Issues are disabled for this repo" error, robustly.
+
+    Confirmed live against a real repo with Issues disabled
+    (``torvalds/linux``, via ``gh issue list --repo torvalds/linux --state
+    all --json updatedAt --limit 1 --search "sort:updated-desc"``), which
+    produces:
+
+        the 'torvalds/linux' repository has disabled issues
+
+    GitHub's GraphQL API is also known to phrase this as something like
+    "Issues have been disabled for this repo (repository.issues)" depending
+    on the code path taken. Rather than pin to either exact string, match
+    case-insensitively on "issues" and "disabled" both appearing -- this
+    covers known wording variants without risking a false match on an
+    unrelated error (which would silently swallow a genuine failure).
+    """
+    lowered = raw_err.lower()
+    return "issues" in lowered and "disabled" in lowered
+
+
 def gh_most_recent_update(
     owner_repo: str,
     kind: Literal["pr", "issue"],
@@ -394,12 +415,16 @@ def gh_most_recent_update(
       PR/issue; *date_str* is that item's ``updatedAt`` truncated to
       ``YYYY-MM-DD``.
     * ``(None, None)``     -- gh ran successfully but the repo genuinely has
-      zero PRs/issues of this kind. This is NOT an error -- a repo can
-      legitimately have no issues (or no PRs) at all.
+      zero PRs/issues of this kind, OR (``kind="issue"`` only) the repo has
+      GitHub Issues disabled entirely. Both cases are folded together
+      deliberately: a repo with Issues disabled can never contribute an
+      issue-based signal, which is exactly what "zero issues" already means
+      to every caller. This is a permanent, benign repo configuration --
+      not an error -- so it must not be surfaced as one.
     * ``(None, error)``    -- gh exited non-zero (after retries) or produced
-      unparsable output; *error* carries a human-readable reason. Callers
-      **must** surface this loudly rather than silently treating it as
-      "no activity".
+      unparsable output for any other reason; *error* carries a
+      human-readable reason. Callers **must** surface this loudly rather
+      than silently treating it as "no activity".
     """
     subcommand = "pr" if kind == "pr" else "issue"
     cmd = [
@@ -425,6 +450,11 @@ def gh_most_recent_update(
             if raw_err
             else "gh exited non-zero with no message"
         )
+        if kind == "issue" and _is_issues_disabled_error(raw_err):
+            # Permanent repo configuration, not a transient failure -- some
+            # repos disable Issues entirely and will never re-enable them.
+            # This is functionally identical to "genuinely zero issues".
+            return None, None
         return None, f"gh error: {first_line}"
 
     if not r.stdout.strip():
