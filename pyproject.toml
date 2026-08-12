@@ -19,6 +19,23 @@ dependencies = [
 readme = "README.md"
 license = { text = "MIT" }
 
+[tool.uv]
+# Resolution override, not a preference.
+#
+# wiki-weaver depends on `amplifier-foundation @ main` directly, AND on
+# `amplifier-module-pipeline-runner` (vendored in the attractor bundle) which
+# pins `amplifier-foundation` to a specific SHA. uv treats two different git
+# URLs for one package as an unresolvable conflict, so `uv sync` fails outright
+# with "Requirements contain conflicting URLs".
+#
+# Nothing in this repo caused it -- the pin drifted upstream, and CI has been
+# red on `main` since 2026-07-09 for this reason alone. This override pins the
+# package to a single URL so resolution succeeds. Remove it once the upstream
+# pins agree again.
+override-dependencies = [
+    "amplifier-foundation @ git+https://github.com/microsoft/amplifier-foundation@main",
+]
+
 [project.optional-dependencies]
 dev = ["pytest"]
 
