@@ -29,11 +29,26 @@ license = { text = "MIT" }
 # with "Requirements contain conflicting URLs".
 #
 # Nothing in this repo caused it -- the pin drifted upstream, and CI has been
-# red on `main` since 2026-07-09 for this reason alone. This override pins the
-# package to a single URL so resolution succeeds. Remove it once the upstream
-# pins agree again.
+# red on `main` since 2026-07-09 for this reason alone.
+#
+# We resolve to the SHA, not to @main, on purpose:
+#
+#   * It is the MORE SPECIFIC of the two constraints. pipeline-runner pinned
+#     deliberately; forcing it onto a moving ref would override that decision
+#     on its behalf.
+#   * @main is a moving target, and that is exactly how this broke. Resolving
+#     to it would re-resolve on every CI run, so the same class of failure can
+#     recur any day without anyone changing anything here.
+#   * The cost is one commit. At the time of writing the pin is a single
+#     commit behind amplifier-foundation's main (ahead_by=1), so this is not a
+#     stale pin -- it is yesterday's main, held still.
+#
+# The trade: wiki-weaver asked for @main and gets the pinned SHA instead. All
+# 293 tests pass either way.
+#
+# Remove this block once the upstream pins agree again.
 override-dependencies = [
-    "amplifier-foundation @ git+https://github.com/microsoft/amplifier-foundation@main",
+    "amplifier-foundation @ git+https://github.com/microsoft/amplifier-foundation@4490bf5f3cf9e5a7829365e84c318a7fd9db7e3d",
 ]
 
 [project.optional-dependencies]
