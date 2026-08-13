@@ -51,6 +51,45 @@ Per window, per repo it emits:
 Org-scoped `owner__repo` filename qualifiers prevent same-basename collisions.
 Never fabricates provenance — all data comes from git / gh plumbing.
 
+### `repo_weaver/fetcher.py` (new) — injectable seam for the GitHub-API half of `materialize()`
+
+`materialize()` does two kinds of I/O: local git plumbing (always `gitio`'s `git *`
+helpers, unaffected by this seam) and GitHub API reads (merged PRs, PR discussion,
+issues, issue discussion). The `gh` CLI authenticates off **ambient process
+environment** (`gitio._run` passes no `env=`), so one process can hold exactly one
+GitHub identity, and `gh` hides HTTP response headers (`X-RateLimit-Reset`,
+`Retry-After`, 401-vs-403), making correct rate-limit handling impossible behind it.
+
+`fetcher.py` defines:
+
+- **`GitHubFetcher`** — a `typing.Protocol` naming exactly the four GitHub-API
+  operations `materialize()` performs: `gh_merged_prs`, `gh_pr_discussion`,
+  `gh_issues`, `gh_issue_discussion` — same signatures and `(data, error)` return
+  shapes as the `gitio.gh_*` functions they mirror.
+- **`GhCliFetcher`** — the default implementation, a thin pass-through to
+  `gitio.gh_*`. `materialize(..., fetcher=None)` (the default for every existing
+  caller) constructs one of these, so behaviour is byte-for-byte unchanged.
+
+A caller needing per-repo credentials (e.g. a GitHub App installation token for
+personal repos vs. a service-account token for org repos) or REST-level header
+visibility supplies its own `GitHubFetcher` implementation via
+`materialize(..., fetcher=my_fetcher)`. The git-local half of `materialize()` is
+untouched — this seam covers only the GitHub API reads.
+
+**Known hazard, documented not fixed here (raise vs. degrade):** on a fetch
+failure, `materialize()` today returns a **valid document** with an italic
+`_(gh error: ... )_` note and zero PRs/issues, rather than failing loudly. A
+caller that just writes the returned documents into a corpus cannot distinguish
+a rate-limited/auth-expired window from a genuinely quiet one — the degraded
+content gets committed and a sync watermark advances past the gap, so it is
+never retried. `materialize()` does **not** wrap fetcher calls in `try/except`
+(the only `try` blocks in that region guard `int()` conversions of PR/issue
+numbers), so **a custom `GitHubFetcher` that wants to prevent a degraded
+document should `raise` instead of returning `(empty, error)`** — the exception
+propagates straight out of `materialize()` to the caller. This is documented in
+`fetcher.py`'s module docstring; changing the *default* (`GhCliFetcher`'s)
+behaviour to raise is an intentionally separate, future change.
+
 ### `repo_weaver/policy/schema.md` — the authored synthesis schema
 
 repo-weaver's **content/policy** fed into wiki-weaver's externalized-schema **mechanism**:

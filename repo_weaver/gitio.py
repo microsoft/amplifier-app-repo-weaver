@@ -23,15 +23,47 @@ from typing import Callable, Literal, Optional
 # Internal runner
 # ---------------------------------------------------------------------------
 
+# Default ceiling for any single git/gh subprocess invocation.  Without this,
+# a hung `git` or `gh` process (dead network, stuck auth prompt, etc.) blocks
+# the calling thread indefinitely -- there was previously no upper bound
+# anywhere in this module.  300s is generous headroom for slow git plumbing
+# on large repos while still guaranteeing forward progress for unattended /
+# scheduled runs.
+_DEFAULT_SUBPROCESS_TIMEOUT: float = 300.0
 
-def _run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
-    """Run a command and return the result (never raises on non-zero exit)."""
-    return subprocess.run(
-        cmd,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-    )
+# `gh repo clone` legitimately needs more room than a metadata call -- cloning
+# a large repo over a slow link can easily exceed the default ceiling.
+_CLONE_SUBPROCESS_TIMEOUT: float = 1800.0
+
+
+def _run(
+    cmd: list[str], timeout: float = _DEFAULT_SUBPROCESS_TIMEOUT
+) -> subprocess.CompletedProcess[str]:
+    """Run a command and return the result (never raises on non-zero exit).
+
+    *timeout* (seconds) bounds how long the subprocess may run; defaults to
+    :data:`_DEFAULT_SUBPROCESS_TIMEOUT`. On :class:`subprocess.TimeoutExpired`
+    this returns the SAME "failed" shape used for a non-zero exit -- a
+    :class:`subprocess.CompletedProcess` with a non-zero returncode and a
+    human-readable stderr message -- rather than letting the exception
+    propagate, preserving this function's "never raises on non-zero exit"
+    contract for a timeout too.
+    """
+    try:
+        return subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess(
+            args=cmd,
+            returncode=1,
+            stdout="",
+            stderr=f"command timed out after {timeout}s: {' '.join(cmd)}",
+        )
 
 
 # Retry configuration for `gh` CLI calls specifically (not plain `git`).
@@ -44,6 +76,7 @@ def _run_gh_with_retry(
     max_attempts: int = _GH_RETRY_MAX_ATTEMPTS,
     base_delay: float = _GH_RETRY_BASE_DELAY,
     _sleep: Optional[Callable[[float], None]] = None,
+    timeout: float = _DEFAULT_SUBPROCESS_TIMEOUT,
 ) -> subprocess.CompletedProcess[str]:
     """Run a ``gh`` CLI command, retrying non-zero exits with exponential back-off.
 
@@ -55,16 +88,21 @@ def _run_gh_with_retry(
     and the cost of one extra retry on a genuinely permanent error (bad auth,
     404) is small compared to silently failing a scheduled/unattended run.
 
+    *timeout* (seconds) is forwarded to each underlying :func:`_run` call --
+    see :data:`_DEFAULT_SUBPROCESS_TIMEOUT`. A per-attempt timeout is treated
+    the same as any other non-zero exit: it counts toward *max_attempts* and
+    is retried like any other transient failure.
+
     Never swallows a failure: if every attempt fails, the LAST attempt's
     ``CompletedProcess`` (non-zero returncode, real stderr) is returned as-is
     so callers see the true failure, not a fabricated success.
     """
     sleep_fn = _sleep if _sleep is not None else time.sleep
-    result = _run(cmd)
+    result = _run(cmd, timeout=timeout)
     attempt = 1
     while result.returncode != 0 and attempt < max_attempts:
         sleep_fn(base_delay * (2 ** (attempt - 1)))
-        result = _run(cmd)
+        result = _run(cmd, timeout=timeout)
         attempt += 1
     return result
 
@@ -754,8 +792,15 @@ def gh_clone_repo(name_with_owner: str, dest: str) -> bool:
     Returns True on success (exit 0), False otherwise. Side-effecting: creates
     a new local clone. Callers (e.g. :func:`repo_weaver.sync.sync_corpus`)
     should call this only when no local clone exists yet at *dest*.
+
+    Uses :data:`_CLONE_SUBPROCESS_TIMEOUT` (30 min) rather than the module
+    default -- a full clone of a large repo over a slow link can legitimately
+    take much longer than a metadata call.
     """
-    r = _run_gh_with_retry(["gh", "repo", "clone", name_with_owner, dest])
+    r = _run_gh_with_retry(
+        ["gh", "repo", "clone", name_with_owner, dest],
+        timeout=_CLONE_SUBPROCESS_TIMEOUT,
+    )
     return r.returncode == 0
 
 

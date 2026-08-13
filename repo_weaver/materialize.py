@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Optional
 
 from . import gitio
+from .fetcher import GhCliFetcher, GitHubFetcher
 
 # Maximum number of files shown in a module inventory before truncating.
 _MAX_INVENTORY_FILES = 60
@@ -622,6 +623,7 @@ def materialize(
     max_modules: int = 5,
     repo_qualifier: Optional[str] = None,
     classify: bool = True,
+    fetcher: Optional[GitHubFetcher] = None,
 ) -> list[tuple[str, str]]:
     """Materialize source documents for the window (since, until].
 
@@ -632,6 +634,20 @@ def materialize(
         until:          Window end date YYYY-MM-DD (inclusive, up to 23:59:59).
         max_prs:        Maximum merged PRs to include in the change digest.
         max_modules:    Maximum module snapshot documents to emit.
+        fetcher:        Injectable seam for the GitHub-API half of this function
+                        (merged PRs, PR discussion, issues, issue discussion).
+                        The git-local half always goes through :mod:`gitio`,
+                        unaffected by this parameter. When ``None`` (the
+                        default), a :class:`repo_weaver.fetcher.GhCliFetcher`
+                        is constructed, which delegates to the existing
+                        ``gitio.gh_*`` functions -- today's behaviour, byte
+                        for byte, for every existing caller. Pass a custom
+                        :class:`repo_weaver.fetcher.GitHubFetcher` implementation
+                        to use per-repo credentials and/or REST-level header
+                        visibility (rate limits, 401 vs 403) instead of the
+                        ambient-environment ``gh`` CLI. See
+                        :mod:`repo_weaver.fetcher` for the raise-vs-degrade
+                        contract a custom fetcher should follow.
         repo_qualifier: When non-None (multi-repo mode) this label is injected
                         into every filename and document body so that sources
                         from different repos never collide and citations always
@@ -692,6 +708,10 @@ def materialize(
     until_rev = gitio.get_window_rev(repo, until)
     commits = gitio.get_commits_name_only(repo, since, until)
 
+    # Injectable GitHub-API seam (Change 1): default to the pass-through CLI
+    # fetcher so every existing caller sees byte-for-byte the same behaviour.
+    active_fetcher: GitHubFetcher = fetcher if fetcher is not None else GhCliFetcher()
+
     docs: list[tuple[str, str]] = []
 
     # 1. Change digest
@@ -709,6 +729,7 @@ def materialize(
         max_prs,
         repo_qualifier,
         classify=classify,
+        fetcher=active_fetcher,
     )
     digest_filename = f"{file_qualifier}-{until}-changes.md"
     docs.append((digest_filename, digest_content))
@@ -766,6 +787,7 @@ def _build_change_digest(
     max_prs: int,
     repo_qualifier: Optional[str] = None,
     classify: bool = True,
+    fetcher: Optional[GitHubFetcher] = None,
 ) -> str:
     """Build the change-digest source document.
 
@@ -792,6 +814,11 @@ def _build_change_digest(
     gh errors are shown explicitly so callers never mistake a fetch failure for
     genuine zero-PR activity.
     """
+    # Fetcher defaults to the pass-through CLI implementation so direct callers
+    # of this (module-private) helper -- e.g. existing tests -- keep working
+    # unchanged even without passing fetcher explicitly.
+    active_fetcher: GitHubFetcher = fetcher if fetcher is not None else GhCliFetcher()
+
     parts: list[str] = []
     parts.append(f"# Changes: {since} \u2192 {until}\n\n")
     # Label the repo so the synthesizer can always derive `repos:` frontmatter.
@@ -815,7 +842,7 @@ def _build_change_digest(
     gh_error: Optional[str] = None
     if owner_repo:
         owner, name = owner_repo
-        prs, gh_error = gitio.gh_merged_prs(
+        prs, gh_error = active_fetcher.gh_merged_prs(
             f"{owner}/{name}", since, until, max_fetch=fetch_cap
         )
 
@@ -840,7 +867,7 @@ def _build_change_digest(
             num = int(pr_number)  # type: ignore[arg-type]
         except (TypeError, ValueError):
             return None, None
-        return gitio.gh_pr_discussion(f"{o}/{n_}", num)
+        return active_fetcher.gh_pr_discussion(f"{o}/{n_}", num)
 
     # Track substantive PR count for Notable Commits gating (updated per branch below).
     substantive_pr_count = 0
@@ -941,7 +968,7 @@ def _build_change_digest(
     issues_error: Optional[str] = None
     if owner_repo:
         _issues_owner, _issues_name = owner_repo
-        issues, issues_error = gitio.gh_issues(
+        issues, issues_error = active_fetcher.gh_issues(
             f"{_issues_owner}/{_issues_name}", since, until
         )
 
@@ -961,7 +988,7 @@ def _build_change_digest(
             num = int(issue_number)  # type: ignore[arg-type]
         except (TypeError, ValueError):
             return None, None
-        return gitio.gh_issue_discussion(f"{o}/{n_}", num)
+        return active_fetcher.gh_issue_discussion(f"{o}/{n_}", num)
 
     parts.append(f"## Issues ({since} \u2192 {until})\n\n")
     if issues_error:

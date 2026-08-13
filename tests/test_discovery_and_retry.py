@@ -55,7 +55,7 @@ def test_run_gh_with_retry_recovers_after_two_failures(monkeypatch: pytest.Monke
         _completed(0, stdout='[{"name": "ok"}]'),
     ]
 
-    def fake_run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
+    def fake_run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
         calls.append(cmd)
         return results[len(calls) - 1]
 
@@ -79,7 +79,7 @@ def test_run_gh_with_retry_surfaces_failure_when_all_attempts_fail(
 ):
     calls: list[list[str]] = []
 
-    def fake_run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
+    def fake_run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
         calls.append(cmd)
         return _completed(1, stderr="gh: permanent auth failure")
 
@@ -105,7 +105,7 @@ def test_run_gh_with_retry_does_not_sleep_on_first_try_success(
 ):
     calls: list[list[str]] = []
 
-    def fake_run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
+    def fake_run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
         calls.append(cmd)
         return _completed(0, stdout="[]")
 

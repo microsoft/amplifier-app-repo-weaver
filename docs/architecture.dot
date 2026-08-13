@@ -25,7 +25,8 @@ digraph repo_weaver_architecture {
     cli [label="cli.py\nthin CLI:\ninit / weave / ask /\nreplay / doctor / sync /\ndiscover / build-dashboard / update", shape=box];
     weave [label="lib/weave.py\nweave · weave_multi · replay_windows\n(windowed, incremental/staggered, retry,\nstrand-rescue, dedup, fetch-or-warn)\n+ sync.py: per-repo watermark replay", shape=box];
     materialize [label="lib/materialize.py\ngit history → source docs\n(change digests, Notable Commits,\nmodule snapshots, owner__repo files)", shape=box];
-    gitio [label="lib/gitio.py\ngit + gh plumbing\n(fetch / fast-forward staleness,\ngh retry/backoff, discover_repos())", shape=box];
+    fetcher [label="lib/fetcher.py  (NEW)\nGitHubFetcher Protocol +\nGhCliFetcher (default, pass-thru)\ninjectable per-repo-credential seam\nfor the GitHub-API half of materialize()", shape=box, fillcolor="#fff2cc", color="#d6b656"];
+    gitio [label="lib/gitio.py\ngit + gh plumbing\n(fetch / fast-forward staleness,\ngh retry/backoff, discover_repos(),\nsubprocess timeouts)", shape=box];
     updater [label="lib/updater.py\nuv reinstall ladder (3 rungs)\n+ PEP 610 direct_url.json verify\n+ wiki-weaver drift check (doctor)", shape=box];
     schema [label="policy/schema.md\nAUTHORED concept-primary\nsynthesis schema\n(attribution + repo-identity rules)", shape=note, fillcolor="#fff2cc", color="#d6b656"];
     eval [label="eval/  (NO LLM)\ngrade.py · trace_grounding.py\ncoverage_check.py", shape=box, fillcolor="#d5e8d4", color="#82b366"];
@@ -55,6 +56,8 @@ digraph repo_weaver_architecture {
   // ================= in-process Python edges (solid) =================
   git_repos -> gitio [label="git / gh\n(fetch, ff)"];
   gitio -> materialize [label="commit history"];
+  materialize -> fetcher [label="GitHub-API reads\n(PRs, discussion, issues)"];
+  fetcher -> gitio [label="GhCliFetcher (default)\ndelegates to gh_*", style=dashed, color="#d6b656", fontcolor="#b8860b"];
   materialize -> inbox [label="writes source docs"];
   cli -> weave [label="weave"];
   cli -> materialize [label="weave", style=dotted];
