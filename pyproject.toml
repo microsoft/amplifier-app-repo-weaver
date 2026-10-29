@@ -6,7 +6,7 @@ build-backend = "hatchling.build"
 name = "repo-weaver"
 version = "0.1.0"
 description = "Turn a git repo's commits + PRs into a queryable knowledge corpus via wiki-weaver."
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 # wiki-weaver is a REAL dependency: repo-weaver imports its path constants (the single
 # source of truth for corpus layout) AND shells out to its CLI for ingest/ask/dashboard.
 # It is not published to PyPI, so it is pinned to @main via a PEP 508 git URL — the same
