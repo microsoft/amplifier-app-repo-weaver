@@ -8,6 +8,10 @@ GATE1  gh_most_recent_update() invokes the correct `gh <pr|issue> list`
 GATE2  gh_most_recent_update() treats "gh succeeded, zero items" as
        (None, None) -- NOT an error.
 GATE3  gh_most_recent_update() surfaces a genuine gh failure as (None, error).
+GATE4  gh_most_recent_update() treats "Issues disabled for this repo" (a
+       permanent, benign repo config, kind="issue" only) as (None, None) --
+       NOT an error -- while still surfacing other, real failures normally
+       and never applying this leniency to kind="pr".
 
 SYNCD1 sync.py's CHANGED-selection loop marks a repo CHANGED when its own
        pushedAt is unchanged but a PR/issue's updatedAt moved past the
@@ -169,6 +173,110 @@ def test_gh_most_recent_update_surfaces_genuine_gh_failure(
     assert date_str is None
     assert error is not None
     assert "authentication failed" in error
+
+
+def test_gh_most_recent_update_issues_disabled_is_not_an_error(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """GATE4: a repo with GitHub Issues disabled is a permanent, benign repo
+    configuration -- not a transient failure. It must fold into the same
+    (None, None) "no signal" case as genuinely-zero-issues.
+
+    Error text confirmed LIVE against a real repo with Issues disabled
+    (``gh issue list --repo torvalds/linux --state all --json updatedAt
+    --limit 1 --search "sort:updated-desc"``), which produced exactly:
+    "the 'torvalds/linux' repository has disabled issues"
+    """
+
+    def fake_run_gh_with_retry(
+        cmd: list[str], **kwargs: Any
+    ) -> subprocess.CompletedProcess[str]:
+        return _completed(
+            1, stderr="the 'torvalds/linux' repository has disabled issues"
+        )
+
+    monkeypatch.setattr(gitio, "_run_gh_with_retry", fake_run_gh_with_retry)
+
+    date_str, error = gitio.gh_most_recent_update("torvalds/linux", "issue")
+    assert date_str is None
+    assert error is None, "Issues-disabled must NOT be surfaced as an error."
+
+
+def test_gh_most_recent_update_issues_disabled_graphql_wording_variant(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """The GraphQL-flavored wording variant must also be recognized, not just
+    the exact REST-style string observed live."""
+
+    def fake_run_gh_with_retry(
+        cmd: list[str], **kwargs: Any
+    ) -> subprocess.CompletedProcess[str]:
+        return _completed(
+            1,
+            stderr="GraphQL: Issues have been disabled for this repo (repository.issues)",
+        )
+
+    monkeypatch.setattr(gitio, "_run_gh_with_retry", fake_run_gh_with_retry)
+
+    date_str, error = gitio.gh_most_recent_update("o/r", "issue")
+    assert date_str is None
+    assert error is None
+
+
+def test_gh_most_recent_update_issues_disabled_detection_scoped_to_issue_kind(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """The issues-disabled detection must never apply to kind="pr" -- PRs
+    can't be individually disabled the same way, so a similarly-shaped
+    error on a "pr" call must still surface as a real error."""
+
+    def fake_run_gh_with_retry(
+        cmd: list[str], **kwargs: Any
+    ) -> subprocess.CompletedProcess[str]:
+        return _completed(1, stderr="the 'o/r' repository has disabled issues")
+
+    monkeypatch.setattr(gitio, "_run_gh_with_retry", fake_run_gh_with_retry)
+
+    date_str, error = gitio.gh_most_recent_update("o/r", "pr")
+    assert date_str is None
+    assert error is not None
+    assert "disabled issues" in error
+
+
+def test_gh_most_recent_update_does_not_overbroaden_match_for_real_failures(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A genuinely different transient failure (rate limit) must still
+    surface as a real error -- the issues-disabled match must not be so
+    broad it swallows unrelated failures."""
+
+    def fake_run_gh_with_retry(
+        cmd: list[str], **kwargs: Any
+    ) -> subprocess.CompletedProcess[str]:
+        return _completed(1, stderr="API rate limit exceeded for user ID 12345.")
+
+    monkeypatch.setattr(gitio, "_run_gh_with_retry", fake_run_gh_with_retry)
+
+    date_str, error = gitio.gh_most_recent_update("o/r", "issue")
+    assert date_str is None
+    assert error is not None
+    assert "rate limit exceeded" in error
+
+
+def test_gh_most_recent_update_command_not_found_still_surfaces_as_error(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    def fake_run_gh_with_retry(
+        cmd: list[str], **kwargs: Any
+    ) -> subprocess.CompletedProcess[str]:
+        return _completed(127, stderr="gh: command not found")
+
+    monkeypatch.setattr(gitio, "_run_gh_with_retry", fake_run_gh_with_retry)
+
+    date_str, error = gitio.gh_most_recent_update("o/r", "issue")
+    assert date_str is None
+    assert error is not None
+    assert "command not found" in error
 
 
 # ---------------------------------------------------------------------------
